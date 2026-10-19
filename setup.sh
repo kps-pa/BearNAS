@@ -262,23 +262,39 @@ repair_bearnas() {
 }
 
 ### ── Mode selection ──
+INSTALLED=0
+if [ -f /etc/systemd/system/bearnas.service ] || [ -x "$INSTALL_DIR/bearnas" ]; then
+  INSTALLED=1
+fi
 printf 'BearNAS Setup\n'
 MODE="${1:-}"
 if [ -z "$MODE" ]; then
   if [ -t 0 ]; then
-    printf '\n  1) Install / upgrade\n'
-    printf '  2) Update to latest\n'
-    printf '  3) Repair\n'
-    printf '  4) Uninstall\n'
-    printf '  5) Cancel\n'
-    if ! read -r -p 'Choose [1-5]: ' pick; then pick=""; fi
-    case "$pick" in
-      1) MODE="--install" ;;
-      2) MODE="--update" ;;
-      3) MODE="--repair" ;;
-      4) MODE="--uninstall" ;;
-      *) printf 'Cancelled.\n'; exit 0 ;;
-    esac
+    if [ "$INSTALLED" = 0 ]; then
+      printf '\n  Status: not installed\n'
+      printf '\n  1) Install\n'
+      printf '  2) Cancel\n'
+      if ! read -r -p 'Choose [1-2]: ' pick; then pick=""; fi
+      case "$pick" in
+        1) MODE="--install" ;;
+        *) printf 'Cancelled.\n'; exit 0 ;;
+      esac
+    else
+      printf '\n  Status: installed'
+      if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service running'; fi
+      printf '\n'
+      printf '\n  1) Update\n'
+      printf '  2) Repair\n'
+      printf '  3) Uninstall\n'
+      printf '  4) Cancel\n'
+      if ! read -r -p 'Choose [1-4]: ' pick; then pick=""; fi
+      case "$pick" in
+        1) MODE="--update" ;;
+        2) MODE="--repair" ;;
+        3) MODE="--uninstall" ;;
+        *) printf 'Cancelled.\n'; exit 0 ;;
+      esac
+    fi
   else
     MODE="--install"
   fi
