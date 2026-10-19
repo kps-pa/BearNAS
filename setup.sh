@@ -34,7 +34,7 @@ usage() {
   printf 'Usage: bash setup.sh [--install|--update|--repair|--uninstall]\n'
   printf '  --install     install or upgrade BearNAS\n'
   printf '  --update      update to the latest version from GitHub\n'
-  printf '  --repair      find and fix problems (binary, service unit, service)\n'
+  printf '  --repair      find and fix problems (binary, unit, service, certificate)\n'
   printf '  --uninstall   remove BearNAS — storage data is never touched\n'
   printf '  (no argument) menu in a terminal, or default to install when piped\n'
 }
@@ -68,6 +68,27 @@ ensure_go() {
   else
     echo "  Downloading Go $GO_VER..."
     curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VER}.linux-${GOARCH2}.tar.gz"
+    if command -v python3 >/dev/null 2>&1; then
+      want="$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" \
+        | python3 -c 'import json,sys
+ver, arch = "go" + sys.argv[1], "linux-" + sys.argv[2]
+for r in json.load(sys.stdin):
+    if r["version"] == ver:
+        for f in r["files"]:
+            if f["os"] + "-" + f["arch"] == arch and f["kind"] == "archive":
+                print(f["sha256"]); raise SystemExit' "$GO_VER" "$GOARCH2" 2>/dev/null || true)"
+      if [ -n "$want" ]; then
+        got="$(sha256sum /tmp/go.tgz | awk '{print $1}')"
+        if [ "$got" != "$want" ]; then
+          printf '  [FAIL] Go — checksum mismatch, aborting\n'
+          rm -f /tmp/go.tgz
+          exit 1
+        fi
+        ok "Go checksum verified"
+      fi
+    else
+      echo "  (python3 not found — checksum skipped)"
+    fi
     rm -rf /usr/local/go
     tar -C /usr/local -xzf /tmp/go.tgz
     rm -f /tmp/go.tgz
@@ -95,6 +116,11 @@ fetch_src() {  # $1: 1 = allow SOURCE_DIR / adjacent checkout, 0 = GitHub only
   mkdir -p "$SRC"
   echo "  Source: GitHub"
   curl -fsSL "$REPO_TARBALL" | tar -xz --strip-components=1 -C "$SRC"
+  if [ ! -f "$SRC/main.go" ] || [ ! -f "$SRC/go.mod" ]; then
+    printf '  [FAIL] Source — no service source found in %s\n' "$REPO_TARBALL"
+    printf '         set SOURCE_DIR (local checkout) or REPO_TARBALL (tarball with main.go)\n'
+    exit 1
+  fi
 }
 
 build_core() {
@@ -114,6 +140,10 @@ After=network.target
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$INSTALL_DIR
+PrivateTmp=yes
 Environment=BEAR_PORT=$BEAR_PORT
 Environment=BEAR_STORAGE=$BEAR_STORAGE
 ExecStart=$INSTALL_DIR/bearnas
@@ -240,6 +270,8 @@ repair_bearnas() {
     ensure_go
     fetch_src 0
     build_core
+    echo "  Resetting self-signed certificate — regenerated on start"
+    rm -f "$INSTALL_DIR/tls.pem" "$INSTALL_DIR/tls.key"
     write_unit
     FIXES=$((FIXES+1))
     if wait_health; then
@@ -310,7 +342,6 @@ esac
 ### ═══ Stage 1/7 — System check ═══
 stage "1/7 System check"
 FAILS=0
-MIGRATE_LEGACY=0
 
 if [ "$(id -u)" -eq 0 ]; then ok "Root"; else fail "Root" "run as root"; fi
 
@@ -368,12 +399,7 @@ fi
 
 port_busy=0
 (exec 3<>"/dev/tcp/127.0.0.1/$BEAR_PORT") 2>/dev/null && port_busy=1
-if systemctl is-active --quiet bearnas 2>/dev/null; then
-  port_busy=0
-elif [ "$port_busy" = 1 ] && systemctl is-active --quiet pico-nas 2>/dev/null; then
-  MIGRATE_LEGACY=1
-  port_busy=0
-fi
+if systemctl is-active --quiet bearnas 2>/dev/null; then port_busy=0; fi
 if [ "$port_busy" = 0 ]; then
   ok "Port $BEAR_PORT free"
 else
@@ -400,14 +426,6 @@ fi
 
 ### ═══ Stage 3/7 — Base packages ═══
 stage "3/7 Base packages"
-if [ "$MIGRATE_LEGACY" = 1 ]; then
-  echo  "  Found old pico-nas service — replacing with BearNAS"
-  systemctl disable --now pico-nas >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/pico-nas.service
-  rm -rf /opt/pico-nas
-  systemctl daemon-reload
-  ok "Old service removed"
-fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq ca-certificates curl
 ok "Packages ready"
