@@ -24,6 +24,7 @@ BEAR_STORAGE="${BEAR_STORAGE:-/mnt/disk1}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/bearnas}"
 REPO_TARBALL="${REPO_TARBALL:-https://github.com/kps-pa/BearNAS/archive/refs/heads/main.tar.gz}"
 SOURCE_DIR="${SOURCE_DIR:-}"
+GO_WE_INSTALLED=0          # 1 = Go ถูกลงโดย BearNAS เอง (ใช้ตอน uninstall)
 
 stage() { printf '\n==> %s\n' "$*"; }
 ok()    { printf '  [OK]   %s\n' "$*"; }
@@ -101,6 +102,7 @@ for r in json.load(sys.stdin):
     tar -C /usr/local -xzf /tmp/go.tgz
     rm -f /tmp/go.tgz
     GO_BIN=/usr/local/go/bin/go
+    GO_WE_INSTALLED=1
     ok "Go installed"
   fi
 }
@@ -210,7 +212,7 @@ remove_bearnas() {
     exit 0
   fi
   printf 'This stops BearNAS and deletes: bearnas.service and %s (binary + certificate).\n' "$INSTALL_DIR"
-  printf 'Data in %s is NOT touched. The Go toolchain is kept.\n' "$BEAR_STORAGE"
+  printf 'Data in %s is NOT touched. The Go toolchain is removed too (when BearNAS installed it).\n' "$BEAR_STORAGE"
   if ! read -r -p "Continue? [y/N] " ans; then ans=""; fi
   case "$ans" in
     y|Y) ;;
@@ -219,9 +221,16 @@ remove_bearnas() {
   systemctl disable --now bearnas >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/bearnas.service
   systemctl daemon-reload
+  REMOVE_GO=0
+  if [ -f "$INSTALL_DIR/.bearnas-installed-go" ]; then REMOVE_GO=1; fi
   rm -rf "$INSTALL_DIR"
-  printf 'BearNAS removed.\n'
-  printf 'Optional — remove the Go toolchain too: rm -rf /usr/local/go ~/.cache/go-build\n'
+  if [ "$REMOVE_GO" = 1 ]; then
+    rm -rf /usr/local/go
+    rm -rf ~/.cache/go-build
+    printf 'BearNAS removed — including the Go toolchain.\n'
+  else
+    printf 'BearNAS removed. Go toolchain kept (it was already installed before BearNAS).\n'
+  fi
   exit 0
 }
 
@@ -387,6 +396,9 @@ ensure_go
 stage "5/7 Build"
 fetch_src 1
 build_core
+if [ "$GO_WE_INSTALLED" = 1 ]; then
+  touch "$INSTALL_DIR/.bearnas-installed-go"
+fi
 
 ### ═══ Stage 6/7 — Service ═══
 stage "6/7 Service"
