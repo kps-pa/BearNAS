@@ -49,7 +49,7 @@ quick_guard() {
 
 download_core() {
   url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
-  echo "  Binary: $url"
+  echo "  From: $url"
   mkdir -p "$INSTALL_DIR"
   if ! curl -fsSL -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
     printf '  [FAIL] Download — could not fetch %s\n' "$url"
@@ -63,13 +63,13 @@ download_core() {
       rm -f "$INSTALL_DIR/bearnas.tmp"
       exit 1
     fi
-    ok "Checksum verified"
+    ok "Download verified — checksum matches"
   else
     echo "  (checksum skipped — file or tool missing)"
   fi
   mv -f "$INSTALL_DIR/bearnas.tmp" "$INSTALL_DIR/bearnas"
   chmod 755 "$INSTALL_DIR/bearnas"
-  ok "Binary installed — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
+  ok "BearNAS binary installed — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
 }
 
 write_unit() {
@@ -96,7 +96,7 @@ UNIT
   systemctl daemon-reload
   systemctl enable bearnas >/dev/null 2>&1
   systemctl restart bearnas
-  ok "Service started"
+  ok "BearNAS service installed and started"
 }
 
 wait_health() {
@@ -163,7 +163,7 @@ MODE="${1:-}"
 if [ -z "$MODE" ]; then
   if [ -t 0 ]; then
     if [ "$INSTALLED" = 0 ]; then
-      printf '\n  Status: not installed\n'
+      printf '\n  BearNAS is not installed yet.\n'
       printf '\n  1) Install\n'
       printf '  2) Cancel\n'
       if ! read -r -p 'Choose [1-2]: ' pick; then pick=""; fi
@@ -172,8 +172,8 @@ if [ -z "$MODE" ]; then
         *) printf 'Cancelled.\n'; exit 0 ;;
       esac
     else
-      printf '\n  Status: installed'
-      if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service running'; fi
+      printf '\n  BearNAS is installed'
+      if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service is running'; fi
       printf '\n'
       printf '\n  1) Uninstall\n'
       printf '  2) Cancel\n'
@@ -211,58 +211,58 @@ fi
 stage "1/6 System check"
 FAILS=0
 
-if [ "$(id -u)" -eq 0 ]; then ok "Root"; else fail "Root" "run as root"; fi
+if [ "$(id -u)" -eq 0 ]; then ok "Running as administrator (root)"; else fail "Administrator" "run this script as root"; fi
 
 if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
-  ok "Inside CT"
+  ok "Running inside the BearNAS container"
 else
-  fail "Inside CT" "run this inside the CT. On the Proxmox host: pct enter <CT-ID>"
+  fail "BearNAS container" "run this installer inside the CT — from the Proxmox host: pct enter <CT-ID>"
 fi
 
 if [ -f /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = "debian" ]; then
-  ok "OS Debian ${VERSION_ID:-}"
+  ok "Operating system Debian ${VERSION_ID:-} — supported"
 else
-  fail "OS" "Debian required, found ${ID:-unknown}"
+  fail "Operating system" "Debian is required, found ${ID:-unknown}"
 fi
 
 cpu_model="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
 case "$(uname -m)" in
-  x86_64)  GOARCH2=amd64 ;;
-  aarch64) GOARCH2=arm64 ;;
+  x86_64)        GOARCH2=amd64 ;;
+  aarch64|arm64) GOARCH2=arm64 ;;
   *) GOARCH2="" ;;
 esac
 if [ -n "$GOARCH2" ]; then
   if [ -n "$cpu_model" ]; then
-    ok "CPU $cpu_model · $GOARCH2"
+    ok "Processor $cpu_model — $GOARCH2, supported"
   else
-    ok "CPU $GOARCH2"
+    ok "Processor $GOARCH2, supported"
   fi
 else
-  fail "CPU" "$(uname -m) not supported"
+  fail "Processor" "$(uname -m) is not supported"
 fi
 
-if [ -d /run/systemd/system ]; then ok "systemd"; else fail "systemd" "systemd required"; fi
+if [ -d /run/systemd/system ]; then ok "Service manager systemd is running"; else fail "Service manager" "systemd is required"; fi
 
 if apt-get update -qq >/dev/null 2>&1; then
-  ok "Internet"
+  ok "Internet connection works"
 else
-  fail "Internet" "apt update failed"
+  fail "Internet connection" "apt update failed — check the network"
 fi
 
 if [ -d "$BEAR_STORAGE" ] && touch "$BEAR_STORAGE/.bearnas-check" 2>/dev/null && rm -f "$BEAR_STORAGE/.bearnas-check"; then
   cap="$(df -Ph "$BEAR_STORAGE" | awk 'NR==2{print $2" total, "$4" free"}')"
-  ok "Storage $BEAR_STORAGE — $cap"
+  ok "Storage $BEAR_STORAGE is ready — $cap"
 else
-  fail "Storage $BEAR_STORAGE" "not found or not writable"
+  fail "Storage $BEAR_STORAGE" "drive not found or not writable"
 fi
 
 free_mb="$(df -Pm / | awk 'NR==2{print $4}')"
 free_gb="$(df -Ph / | awk 'NR==2{print $4}')"
 if [ "${free_mb:-0}" -ge 100 ]; then
-  ok "System disk — $free_gb free"
+  ok "System disk has enough space — $free_gb free"
 else
-  fail "System disk" "${free_gb:-?} free, need at least 100MB"
+  fail "System disk" "only ${free_gb:-?} free, at least 100MB is required"
 fi
 
 port_bad=0
@@ -276,15 +276,15 @@ if [ "$port_bad" = 0 ]; then
 fi
 if systemctl is-active --quiet bearnas 2>/dev/null; then port_busy=0; fi
 if [ "$port_bad" = 1 ]; then
-  fail "Port" "BEAR_PORT must be a number 1-65535"
+  fail "Web port" "port number must be between 1 and 65535"
 elif [ "$port_busy" = 0 ]; then
-  ok "Port $BEAR_PORT free"
+  ok "Web port $BEAR_PORT is free"
 else
-  fail "Port $BEAR_PORT" "another program is using it"
+  fail "Web port $BEAR_PORT" "another program is using this port"
 fi
 
 if [ "$FAILS" -gt 0 ]; then
-  printf '\nStopped — %s problem(s) found. Nothing was changed.\n' "$FAILS"
+  printf '\nCannot continue — %s problem(s) found. Nothing was changed.\n' "$FAILS"
   exit 1
 fi
 
@@ -292,9 +292,9 @@ fi
 stage "2/6 Network"
 CUR_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 CUR_GW="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
-printf '  IP %s · gateway %s\n' "${CUR_IP:-?}" "${CUR_GW:-?}"
+printf '  Network: IP %s · gateway %s\n' "${CUR_IP:-?}" "${CUR_GW:-?}"
 if [ -n "$CUR_IP" ] && ! grep -q 'iface eth0 inet dhcp' /etc/network/interfaces 2>/dev/null; then
-  ok "Fixed IP already set: $CUR_IP"
+  ok "Fixed IP address is configured — $CUR_IP"
 else
   warn "IP comes from DHCP — it may change after a reboot"
   echo  "  Tip: set a fixed IP on the Proxmox host, then restart the CT:"
@@ -305,7 +305,7 @@ fi
 stage "3/6 Base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq ca-certificates curl
-ok "Packages ready"
+ok "Required packages installed"
 
 ### ═══ Stage 4/6 — Download ═══
 stage "4/6 Download"
@@ -318,7 +318,7 @@ write_unit
 ### ═══ Stage 6/6 — Health check ═══
 stage "6/6 Health check"
 if wait_health; then
-  ok "Service is up"
+  ok "BearNAS is responding over HTTPS"
 else
   fail "Service" "no response in 15s"
   show_diag
