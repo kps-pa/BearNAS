@@ -9,22 +9,19 @@
 #    bash setup.sh --repair     # find and fix problems
 #    bash setup.sh --uninstall  # remove BearNAS — storage data is never touched
 #
-#  Install runs 7 stages. Everything is checked first — if a check fails,
+#  Install runs 6 stages. Everything is checked first — if a check fails,
 #  nothing is changed. Re-run any time to upgrade.
 #
 #  Optional settings (environment variables):
-#    GO_VER / BEAR_PORT / BEAR_STORAGE / INSTALL_DIR / REPO_TARBALL / SOURCE_DIR
+#    BEAR_PORT / BEAR_STORAGE / INSTALL_DIR / DIST_BASE
 # ==============================================================================
 set -euo pipefail
 
 ### ── Defaults ──
-GO_VER="${GO_VER:-1.27.2}"
 BEAR_PORT="${BEAR_PORT:-8900}"
 BEAR_STORAGE="${BEAR_STORAGE:-/mnt/disk1}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/bearnas}"
-REPO_TARBALL="${REPO_TARBALL:-https://github.com/kps-pa/BearNAS/archive/refs/heads/main.tar.gz}"
-SOURCE_DIR="${SOURCE_DIR:-}"
-GO_WE_INSTALLED=0          # 1 = Go ถูกลงโดย BearNAS เอง (ใช้ตอน uninstall)
+DIST_BASE="${DIST_BASE:-https://raw.githubusercontent.com/kps-pa/BearNAS/main/dist}"
 
 stage() { printf '\n==> %s\n' "$*"; }
 ok()    { printf '  [OK]   %s\n' "$*"; }
@@ -50,99 +47,29 @@ quick_guard() {
   fi
 }
 
-ensure_go() {
-  case "$GO_VER" in
-    *[!0-9.]*)
-      printf '  [FAIL] Go — invalid GO_VER %s\n' "$GO_VER"
-      exit 1
-      ;;
-  esac
-  GOARCH2=""
-  case "$(uname -m)" in
-    x86_64)  GOARCH2=amd64 ;;
-    aarch64) GOARCH2=arm64 ;;
-    *) printf '  [FAIL] CPU — %s not supported\n' "$(uname -m)"; exit 1 ;;
-  esac
-  GO_BIN=""
-  if command -v go >/dev/null 2>&1; then
-    GO_BIN="$(command -v go)"
-  elif [ -x /usr/local/go/bin/go ]; then
-    GO_BIN=/usr/local/go/bin/go
-  fi
-  if [ -n "$GO_BIN" ]; then
-    ok "Go already installed"
-  else
-    echo "  Downloading Go $GO_VER..."
-    if ! curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VER}.linux-${GOARCH2}.tar.gz"; then
-      printf '  [FAIL] Go — download failed\n'
-      exit 1
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-      want="$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" \
-        | python3 -c 'import json,sys
-ver, arch = "go" + sys.argv[1], "linux-" + sys.argv[2]
-for r in json.load(sys.stdin):
-    if r["version"] == ver:
-        for f in r["files"]:
-            if f["os"] + "-" + f["arch"] == arch and f["kind"] == "archive":
-                print(f["sha256"]); raise SystemExit' "$GO_VER" "$GOARCH2" 2>/dev/null || true)"
-      if [ -n "$want" ]; then
-        got="$(sha256sum /tmp/go.tgz | awk '{print $1}')"
-        if [ "$got" != "$want" ]; then
-          printf '  [FAIL] Go — checksum mismatch, aborting\n'
-          rm -f /tmp/go.tgz
-          exit 1
-        fi
-        ok "Go checksum verified"
-      fi
-    else
-      echo "  (python3 not found — checksum skipped)"
-    fi
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf /tmp/go.tgz
-    rm -f /tmp/go.tgz
-    GO_BIN=/usr/local/go/bin/go
-    GO_WE_INSTALLED=1
-    ok "Go installed"
-  fi
-}
-
-fetch_src() {  # $1: 1 = allow SOURCE_DIR / adjacent checkout, 0 = GitHub only
-  if [ "$1" = 1 ] && [ -n "$SOURCE_DIR" ] && [ -f "$SOURCE_DIR/go.mod" ] && [ -f "$SOURCE_DIR/main.go" ]; then
-    SRC="$SOURCE_DIR"
-    echo "  Source: $SRC"
-    return
-  fi
-  if [ "$1" = 1 ]; then
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if [ -f "$SCRIPT_DIR/go.mod" ] && [ -f "$SCRIPT_DIR/main.go" ]; then
-      SRC="$SCRIPT_DIR"
-      echo "  Source: local checkout"
-      return
-    fi
-  fi
-  SRC=/tmp/bearnas-src
-  rm -rf "$SRC"
-  mkdir -p "$SRC"
-  echo "  Source: GitHub"
-  if ! curl -fsSL "$REPO_TARBALL" | tar -xz --strip-components=1 -C "$SRC"; then
-    printf '  [FAIL] Source — could not download %s\n' "$REPO_TARBALL"
-    exit 1
-  fi
-  if [ ! -f "$SRC/main.go" ] || [ ! -f "$SRC/go.mod" ]; then
-    printf '  [FAIL] Source — no service source found in %s\n' "$REPO_TARBALL"
-    printf '         set SOURCE_DIR (local checkout) or REPO_TARBALL (tarball with main.go)\n'
-    exit 1
-  fi
-}
-
-build_core() {
+download_core() {
+  url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
+  echo "  Binary: $url"
   mkdir -p "$INSTALL_DIR"
-  (
-    cd "$SRC"
-    CGO_ENABLED=0 "$GO_BIN" build -trimpath -ldflags "-s -w" -o "$INSTALL_DIR/bearnas" .
-  )
-  ok "Built $INSTALL_DIR/bearnas — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
+  if ! curl -fsSL -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
+    printf '  [FAIL] Download — could not fetch %s\n' "$url"
+    exit 1
+  fi
+  want="$(curl -fsSL "$DIST_BASE/bearnas-linux-$GOARCH2/bearnas.sha256" 2>/dev/null | awk '{print $1}')"
+  got="$(sha256sum "$INSTALL_DIR/bearnas.tmp" 2>/dev/null | awk '{print $1}')"
+  if [ -n "$want" ] && [ -n "$got" ]; then
+    if [ "$got" != "$want" ]; then
+      printf '  [FAIL] Download — checksum mismatch\n'
+      rm -f "$INSTALL_DIR/bearnas.tmp"
+      exit 1
+    fi
+    ok "Checksum verified"
+  else
+    echo "  (checksum skipped — file or tool missing)"
+  fi
+  mv -f "$INSTALL_DIR/bearnas.tmp" "$INSTALL_DIR/bearnas"
+  chmod 755 "$INSTALL_DIR/bearnas"
+  ok "Binary installed — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
 }
 
 write_unit() {
@@ -212,7 +139,7 @@ remove_bearnas() {
     exit 0
   fi
   printf 'This stops BearNAS and deletes: bearnas.service and %s (binary + certificate).\n' "$INSTALL_DIR"
-  printf 'Data in %s is NOT touched. The Go toolchain is removed too (when BearNAS installed it).\n' "$BEAR_STORAGE"
+  printf 'Data in %s is NOT touched.\n' "$BEAR_STORAGE"
   if ! read -r -p "Continue? [y/N] " ans; then ans=""; fi
   case "$ans" in
     y|Y) ;;
@@ -221,16 +148,8 @@ remove_bearnas() {
   systemctl disable --now bearnas >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/bearnas.service
   systemctl daemon-reload
-  REMOVE_GO=0
-  if [ -f "$INSTALL_DIR/.bearnas-installed-go" ]; then REMOVE_GO=1; fi
   rm -rf "$INSTALL_DIR"
-  if [ "$REMOVE_GO" = 1 ]; then
-    rm -rf /usr/local/go
-    rm -rf ~/.cache/go-build
-    printf 'BearNAS removed — including the Go toolchain.\n'
-  else
-    printf 'BearNAS removed. Go toolchain kept (it was already installed before BearNAS).\n'
-  fi
+  printf 'BearNAS removed.\n'
   exit 0
 }
 
@@ -288,8 +207,8 @@ if [ -d /run ] && [ -w /run ]; then
   fi
 fi
 
-### ═══ Stage 1/7 — System check ═══
-stage "1/7 System check"
+### ═══ Stage 1/6 — System check ═══
+stage "1/6 System check"
 FAILS=0
 
 if [ "$(id -u)" -eq 0 ]; then ok "Root"; else fail "Root" "run as root"; fi
@@ -340,10 +259,10 @@ fi
 
 free_mb="$(df -Pm / | awk 'NR==2{print $4}')"
 free_gb="$(df -Ph / | awk 'NR==2{print $4}')"
-if [ "${free_mb:-0}" -ge 600 ]; then
+if [ "${free_mb:-0}" -ge 100 ]; then
   ok "System disk — $free_gb free"
 else
-  fail "System disk" "${free_gb:-?} free, need at least 600MB"
+  fail "System disk" "${free_gb:-?} free, need at least 100MB"
 fi
 
 port_bad=0
@@ -369,8 +288,8 @@ if [ "$FAILS" -gt 0 ]; then
   exit 1
 fi
 
-### ═══ Stage 2/7 — Network ═══
-stage "2/7 Network"
+### ═══ Stage 2/6 — Network ═══
+stage "2/6 Network"
 CUR_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 CUR_GW="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
 printf '  IP %s · gateway %s\n' "${CUR_IP:-?}" "${CUR_GW:-?}"
@@ -382,30 +301,22 @@ else
   echo  "       pct set <CT-ID> -net0 name=eth0,bridge=vmbr0,ip=${CUR_IP:-<ip>}/24,gw=${CUR_GW:-<gw>}"
 fi
 
-### ═══ Stage 3/7 — Base packages ═══
-stage "3/7 Base packages"
+### ═══ Stage 3/6 — Base packages ═══
+stage "3/6 Base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq ca-certificates curl
 ok "Packages ready"
 
-### ═══ Stage 4/7 — Go ═══
-stage "4/7 Go"
-ensure_go
+### ═══ Stage 4/6 — Download ═══
+stage "4/6 Download"
+download_core
 
-### ═══ Stage 5/7 — Build ═══
-stage "5/7 Build"
-fetch_src 1
-build_core
-if [ "$GO_WE_INSTALLED" = 1 ]; then
-  touch "$INSTALL_DIR/.bearnas-installed-go"
-fi
-
-### ═══ Stage 6/7 — Service ═══
-stage "6/7 Service"
+### ═══ Stage 5/6 — Service ═══
+stage "5/6 Service"
 write_unit
 
-### ═══ Stage 7/7 — Health check ═══
-stage "7/7 Health check"
+### ═══ Stage 6/6 — Health check ═══
+stage "6/6 Health check"
 if wait_health; then
   ok "Service is up"
 else
