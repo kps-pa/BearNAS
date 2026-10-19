@@ -1,0 +1,3 @@
+# src และ build script เป็นของส่วนตัว — เผยแพร่เฉพาะ dist/ และ setup.sh เท่านั้น
+src/
+build.sh
