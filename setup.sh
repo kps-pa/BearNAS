@@ -232,14 +232,26 @@ case "$(uname -m)" in
   aarch64|arm64) GOARCH2=arm64 ;;
   *) GOARCH2="" ;;
 esac
+kernel_ver="$(uname -r)"
+ok "Kernel ${kernel_ver:-unknown}"
+
+cores="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo '?')"
 if [ -n "$GOARCH2" ]; then
   if [ -n "$cpu_model" ]; then
-    ok "Processor $cpu_model — $GOARCH2, supported"
+    ok "Processor $cpu_model — $cores cores, $GOARCH2, supported"
   else
-    ok "Processor $GOARCH2, supported"
+    ok "Processor $GOARCH2, $cores cores — supported"
   fi
 else
   fail "Processor" "$(uname -m) is not supported"
+fi
+
+mem_total_kb="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+if [ -n "$mem_total_kb" ]; then
+  mem_gb="$(awk -v k="$mem_total_kb" 'BEGIN{printf "%.1f", k/1048576}')"
+  ok "Memory ${mem_gb}G"
+else
+  ok "Memory unknown"
 fi
 
 if [ -d /run/systemd/system ]; then ok "Service manager systemd is running"; else fail "Service manager" "systemd is required"; fi
