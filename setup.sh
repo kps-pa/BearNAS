@@ -47,7 +47,7 @@ quick_guard() {
   fi
 }
 
-download_core() {
+download_bearnas() {
   url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
   echo "  From: $url"
   mkdir -p "$INSTALL_DIR"
@@ -75,7 +75,7 @@ download_core() {
 write_unit() {
   cat >/etc/systemd/system/bearnas.service <<UNIT
 [Unit]
-Description=BearNAS core
+Description=BearNAS
 After=network.target
 
 [Service]
@@ -321,7 +321,7 @@ ok "Required packages installed"
 
 ### ═══ Stage 4/6 — Download ═══
 stage "4/6 Download"
-download_core
+download_bearnas
 
 ### ═══ Stage 5/6 — Service ═══
 stage "5/6 Service"
