@@ -31,11 +31,10 @@ warn()  { printf '  [WARN] %s\n' "$*"; }
 fail()  { printf '  [FAIL] %s — %s\n' "$1" "$2"; FAILS=$((FAILS+1)); }
 
 usage() {
-  printf 'Usage: bash setup.sh [--install|--update|--repair|--uninstall]\n'
-  printf '  --install     install or upgrade BearNAS\n'
-  printf '  --update      update to the latest version from GitHub\n'
-  printf '  --repair      find and fix problems (binary, unit, service, certificate)\n'
+  printf 'Usage: bash setup.sh [--install|--uninstall]\n'
+  printf '  --install     install BearNAS\n'
   printf '  --uninstall   remove BearNAS — storage data is never touched\n'
+  printf '  (--update / --repair are reserved — the system is not finished yet)\n'
   printf '  (no argument) menu in a terminal, or default to install when piped\n'
 }
 
@@ -51,6 +50,12 @@ quick_guard() {
 }
 
 ensure_go() {
+  case "$GO_VER" in
+    *[!0-9.]*)
+      printf '  [FAIL] Go — invalid GO_VER %s\n' "$GO_VER"
+      exit 1
+      ;;
+  esac
   GOARCH2=""
   case "$(uname -m)" in
     x86_64)  GOARCH2=amd64 ;;
@@ -67,7 +72,10 @@ ensure_go() {
     ok "Go already installed"
   else
     echo "  Downloading Go $GO_VER..."
-    curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VER}.linux-${GOARCH2}.tar.gz"
+    if ! curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VER}.linux-${GOARCH2}.tar.gz"; then
+      printf '  [FAIL] Go — download failed\n'
+      exit 1
+    fi
     if command -v python3 >/dev/null 2>&1; then
       want="$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" \
         | python3 -c 'import json,sys
@@ -115,7 +123,10 @@ fetch_src() {  # $1: 1 = allow SOURCE_DIR / adjacent checkout, 0 = GitHub only
   rm -rf "$SRC"
   mkdir -p "$SRC"
   echo "  Source: GitHub"
-  curl -fsSL "$REPO_TARBALL" | tar -xz --strip-components=1 -C "$SRC"
+  if ! curl -fsSL "$REPO_TARBALL" | tar -xz --strip-components=1 -C "$SRC"; then
+    printf '  [FAIL] Source — could not download %s\n' "$REPO_TARBALL"
+    exit 1
+  fi
   if [ ! -f "$SRC/main.go" ] || [ ! -f "$SRC/go.mod" ]; then
     printf '  [FAIL] Source — no service source found in %s\n' "$REPO_TARBALL"
     printf '         set SOURCE_DIR (local checkout) or REPO_TARBALL (tarball with main.go)\n'
@@ -188,6 +199,16 @@ summary() {
 
 remove_bearnas() {
   quick_guard
+  case "$INSTALL_DIR" in
+    ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home")
+      printf 'Refusing to delete INSTALL_DIR=%s\n' "$INSTALL_DIR"
+      exit 1
+      ;;
+  esac
+  if [ ! -f /etc/systemd/system/bearnas.service ] && [ ! -x "$INSTALL_DIR/bearnas" ]; then
+    printf 'BearNAS is not installed — nothing to remove.\n'
+    exit 0
+  fi
   printf 'This stops BearNAS and deletes: bearnas.service and %s (binary + certificate).\n' "$INSTALL_DIR"
   printf 'Data in %s is NOT touched. The Go toolchain is kept.\n' "$BEAR_STORAGE"
   if ! read -r -p "Continue? [y/N] " ans; then ans=""; fi
@@ -201,95 +222,6 @@ remove_bearnas() {
   rm -rf "$INSTALL_DIR"
   printf 'BearNAS removed.\n'
   printf 'Optional — remove the Go toolchain too: rm -rf /usr/local/go ~/.cache/go-build\n'
-  exit 0
-}
-
-update_bearnas() {
-  quick_guard
-  stage "Update"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y -qq ca-certificates curl >/dev/null
-  ensure_go
-  fetch_src 0
-  build_core
-  write_unit
-  if wait_health; then
-    ok "Service is up"
-  else
-    fail "Service" "no response in 15s"
-    show_diag
-    exit 1
-  fi
-  summary "BearNAS updated — running the latest version"
-  exit 0
-}
-
-repair_bearnas() {
-  quick_guard
-  stage "Repair"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq >/dev/null 2>&1 || true
-  apt-get install -y -qq ca-certificates curl >/dev/null 2>&1 || true
-  FIXES=0
-
-  if [ -d "$BEAR_STORAGE" ]; then
-    ok "Storage $BEAR_STORAGE present"
-  else
-    warn "Storage $BEAR_STORAGE missing — bind mount it from the Proxmox host (cannot fix from inside the CT)"
-  fi
-
-  if [ -x "$INSTALL_DIR/bearnas" ]; then
-    ok "Binary present"
-  else
-    echo "  Binary missing — rebuilding from GitHub"
-    ensure_go
-    fetch_src 0
-    build_core
-    FIXES=$((FIXES+1))
-  fi
-
-  if [ -f /etc/systemd/system/bearnas.service ]; then
-    ok "Service unit present"
-  else
-    echo "  Service unit missing — recreating"
-    FIXES=$((FIXES+1))
-  fi
-
-  if systemctl is-active --quiet bearnas 2>/dev/null; then
-    ok "Service running"
-  else
-    echo "  Service not running — restarting"
-    FIXES=$((FIXES+1))
-  fi
-  write_unit
-
-  if wait_health; then
-    ok "HTTPS responding"
-  else
-    echo "  Service not responding — rebuilding from GitHub"
-    ensure_go
-    fetch_src 0
-    build_core
-    echo "  Resetting self-signed certificate — regenerated on start"
-    rm -f "$INSTALL_DIR/tls.pem" "$INSTALL_DIR/tls.key"
-    write_unit
-    FIXES=$((FIXES+1))
-    if wait_health; then
-      ok "HTTPS responding after rebuild"
-    else
-      fail "Service" "still not responding — diagnostics below"
-      show_diag
-      exit 1
-    fi
-  fi
-
-  printf '\n'
-  if [ "$FIXES" -gt 0 ]; then
-    printf 'Repair done — %s item(s) fixed.\n' "$FIXES"
-  else
-    printf 'Repair done — everything was already healthy.\n'
-  fi
-  summary "BearNAS is healthy"
   exit 0
 }
 
@@ -315,15 +247,11 @@ if [ -z "$MODE" ]; then
       printf '\n  Status: installed'
       if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service running'; fi
       printf '\n'
-      printf '\n  1) Update\n'
-      printf '  2) Repair\n'
-      printf '  3) Uninstall\n'
-      printf '  4) Cancel\n'
-      if ! read -r -p 'Choose [1-4]: ' pick; then pick=""; fi
+      printf '\n  1) Uninstall\n'
+      printf '  2) Cancel\n'
+      if ! read -r -p 'Choose [1-2]: ' pick; then pick=""; fi
       case "$pick" in
-        1) MODE="--update" ;;
-        2) MODE="--repair" ;;
-        3) MODE="--uninstall" ;;
+        1) MODE="--uninstall" ;;
         *) printf 'Cancelled.\n'; exit 0 ;;
       esac
     fi
@@ -333,11 +261,23 @@ if [ -z "$MODE" ]; then
 fi
 case "$MODE" in
   --install) ;;
-  --update)              update_bearnas ;;
-  --repair)              repair_bearnas ;;
   --uninstall)           remove_bearnas ;;
+  --update|--repair)
+    printf '\n%s is not available yet — the system is still under construction.\n' "$MODE"
+    printf 'It will be enabled once the project is complete.\n'
+    exit 0
+    ;;
   *) usage; exit 1 ;;
 esac
+
+### ── Single-run lock (กันรันซ้อนสอง session) ──
+if [ -d /run ] && [ -w /run ]; then
+  exec 9>/run/bearnas-setup.lock
+  if ! flock -n 9; then
+    printf 'Another setup.sh is already running.\n'
+    exit 1
+  fi
+fi
 
 ### ═══ Stage 1/7 — System check ═══
 stage "1/7 System check"
@@ -351,14 +291,14 @@ else
   fail "Inside CT" "run this inside the CT. On the Proxmox host: pct enter <CT-ID>"
 fi
 
-[ -f /etc/os-release ] && . /etc/os-release
+if [ -f /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = "debian" ]; then
   ok "OS Debian ${VERSION_ID:-}"
 else
   fail "OS" "Debian required, found ${ID:-unknown}"
 fi
 
-cpu_model="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+cpu_model="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
 case "$(uname -m)" in
   x86_64)  GOARCH2=amd64 ;;
   aarch64) GOARCH2=arm64 ;;
@@ -397,10 +337,19 @@ else
   fail "System disk" "${free_gb:-?} free, need at least 600MB"
 fi
 
+port_bad=0
+case "$BEAR_PORT" in
+  ''|*[!0-9]*) port_bad=1 ;;
+  *) [ "$BEAR_PORT" -ge 1 ] && [ "$BEAR_PORT" -le 65535 ] || port_bad=1 ;;
+esac
 port_busy=0
-(exec 3<>"/dev/tcp/127.0.0.1/$BEAR_PORT") 2>/dev/null && port_busy=1
+if [ "$port_bad" = 0 ]; then
+  (exec 3<>"/dev/tcp/127.0.0.1/$BEAR_PORT") 2>/dev/null && port_busy=1
+fi
 if systemctl is-active --quiet bearnas 2>/dev/null; then port_busy=0; fi
-if [ "$port_busy" = 0 ]; then
+if [ "$port_bad" = 1 ]; then
+  fail "Port" "BEAR_PORT must be a number 1-65535"
+elif [ "$port_busy" = 0 ]; then
   ok "Port $BEAR_PORT free"
 else
   fail "Port $BEAR_PORT" "another program is using it"
