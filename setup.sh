@@ -80,16 +80,17 @@ After=network.target
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
+# BearNAS เป็น appliance ที่บริหารระบบเอง (apt ติดตั้ง samba, useradd/groupadd,
+# เขียน /etc/samba/smb.conf, สั่ง systemctl) จึงต้องถอด ProtectSystem=strict
+# (ทำทั้งไฟล์ระบบ read-only) และ RestrictSUIDSGID (dpkg ตั้ง suid bit ไม่ได้)
+# ส่วนการป้องกันที่ไม่ขัดงานติดตั้งแพ็กเกจคงไว้ครบ
 NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=$INSTALL_DIR
 PrivateTmp=yes
 ProtectHome=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictSUIDSGID=yes
 LockPersonality=yes
 Environment=BEAR_PORT=$BEAR_PORT
 Environment=BEAR_STORAGE=$BEAR_STORAGE
