@@ -146,18 +146,76 @@ remove_bearnas() {
     printf 'BearNAS is not installed — nothing to remove.\n'
     exit 0
   fi
-  printf 'This stops BearNAS and deletes: bearnas.service and %s (binary + certificate).\n' "$INSTALL_DIR"
+
+  # smb.conf ที่ BearNAS เขียนเองจะมีลายเซ็นบรรทัดแรก — ลบเฉพาะไฟล์ของเราเท่านั้น
+  SMB_MANAGED=0
+  if [ -f /etc/samba/smb.conf ] && head -1 /etc/samba/smb.conf | grep -q 'Managed by BearNAS'; then
+    SMB_MANAGED=1
+  fi
+
+  printf 'This stops BearNAS and deletes:\n'
+  printf '  - bearnas.service\n'
+  printf '  - %s (binary, certificate, settings db, device key)\n' "$INSTALL_DIR"
+  if [ "$SMB_MANAGED" = 1 ]; then
+    printf '  - /etc/samba/smb.conf written by BearNAS + the [bear] share\n'
+  fi
+  printf '  - Samba accounts and the "bearnas" group created by BearNAS\n'
   printf 'Data in %s is NOT touched.\n' "$BEAR_STORAGE"
   if ! read -r -p "Continue? [y/N] " ans; then ans=""; fi
   case "$ans" in
     y|Y) ;;
     *) printf 'Cancelled.\n'; exit 0 ;;
   esac
+
+  PURGE_SAMBA=0
+  if command -v smbd >/dev/null 2>&1; then
+    if ! read -r -p "Also remove the Samba packages (apt purge samba)? [y/N] " ans2; then ans2=""; fi
+    case "$ans2" in y|Y) PURGE_SAMBA=1 ;; esac
+  fi
+
+  stage "Stopping BearNAS"
   systemctl disable --now bearnas >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/bearnas.service
   systemctl daemon-reload
+
+  stage "Removing Samba accounts created by BearNAS"
+  # ลบเฉพาะ user ที่ BearNAS สร้าง: system user ไม่มี shell ล็อกอิน และอยู่ในกลุ่ม bearnas
+  if getent group bearnas >/dev/null 2>&1; then
+    members="$(getent group bearnas | cut -d: -f4 | tr ',' ' ')"
+    for u in $members; do
+      [ -n "$u" ] || continue
+      if command -v smbpasswd >/dev/null 2>&1; then smbpasswd -x "$u" >/dev/null 2>&1 || true; fi
+      shell="$(getent passwd "$u" | cut -d: -f7)"
+      case "$shell" in
+        */nologin|*/false) userdel "$u" >/dev/null 2>&1 || true ;;
+        *) printf '  kept login user %s (not created by BearNAS)\n' "$u" ;;
+      esac
+    done
+    groupdel bearnas >/dev/null 2>&1 || true
+  fi
+
+  if [ "$SMB_MANAGED" = 1 ]; then
+    stage "Restoring default smb.conf"
+    # คืนไฟล์ตั้งต้นของ distro ถ้ามี (Debian เก็บไว้ที่ /usr/share/samba) ไม่งั้นใส่ global ว่าง
+    # เพื่อให้ smbd ยังเปิดได้แต่ไม่แชร์อะไร — ถ้า purge ด้านล่างจะหายไปทั้งก้อนอยู่แล้ว
+    if [ -f /usr/share/samba/smb.conf ]; then
+      cp -f /usr/share/samba/smb.conf /etc/samba/smb.conf
+    else
+      printf '[global]\n\tserver role = standalone server\n\tmap to guest = never\n' > /etc/samba/smb.conf
+    fi
+    systemctl restart smbd >/dev/null 2>&1 || true
+  fi
+
+  if [ "$PURGE_SAMBA" = 1 ]; then
+    stage "Purging Samba packages"
+    systemctl disable --now smbd nmbd >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y samba samba-common samba-common-bin >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1 || true
+  fi
+
+  stage "Removing BearNAS files"
   rm -rf "$INSTALL_DIR"
-  printf 'BearNAS removed.\n'
+  printf '\nBearNAS removed.\n'
   exit 0
 }
 
