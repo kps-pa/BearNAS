@@ -84,6 +84,13 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=$INSTALL_DIR
 PrivateTmp=yes
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 Environment=BEAR_PORT=$BEAR_PORT
 Environment=BEAR_STORAGE=$BEAR_STORAGE
 ExecStart=$INSTALL_DIR/bearnas
