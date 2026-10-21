@@ -148,19 +148,23 @@ remove_bearnas() {
   fi
 
   # smb.conf ที่ BearNAS เขียนเองจะมีลายเซ็นบรรทัดแรก — ลบเฉพาะไฟล์ของเราเท่านั้น
+  # (โมเดลหลายแชร์: เก็บพาธของทุกแชร์ไว้ก่อน เพื่อคืนสิทธิ์บนดิสก์ข้อมูลหลังลบกลุ่ม)
   SMB_MANAGED=0
+  SHARE_PATHS=""
   if [ -f /etc/samba/smb.conf ] && head -1 /etc/samba/smb.conf | grep -q 'Managed by BearNAS'; then
     SMB_MANAGED=1
+    SHARE_PATHS="$(grep -E '^[[:space:]]*path[[:space:]]*=' /etc/samba/smb.conf | sed -E 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//' | sort -u)"
   fi
 
   printf 'This stops BearNAS and deletes:\n'
   printf '  - bearnas.service\n'
   printf '  - %s (binary, certificate, settings db, device key)\n' "$INSTALL_DIR"
   if [ "$SMB_MANAGED" = 1 ]; then
-    printf '  - /etc/samba/smb.conf written by BearNAS + the [bear] share\n'
+    printf '  - /etc/samba/smb.conf written by BearNAS (all BearNAS shares stop)\n'
   fi
   printf '  - Samba accounts and the "bearnas" group created by BearNAS\n'
-  printf 'Data in %s is NOT touched.\n' "$BEAR_STORAGE"
+  printf '  - setgid/group "bearnas" markers on shared folders, trash folders and users/ (reset to root)\n'
+  printf 'Data files in %s are NOT touched (content stays as-is).\n' "$BEAR_STORAGE"
   if ! read -r -p "Continue? [y/N] " ans; then ans=""; fi
   case "$ans" in
     y|Y) ;;
@@ -193,6 +197,24 @@ remove_bearnas() {
     done
     groupdel bearnas >/dev/null 2>&1 || true
   fi
+
+  # คืนสิทธิ์ระดับ "รากโฟลเดอร์" ที่ BearNAS เคยแตะ: ถอด setgid + เปลี่ยนกลุ่มกลับเป็น root
+  # (ไฟล์/โฟลเดอร์ข้างในไม่แตะ — ข้อมูลของผู้ใช้ทั้งหมดอยู่ครบ แค่ gid เดิมอาจแสดงเป็นตัวเลข ซึ่งไม่มีผลร้าย)
+  stage "Resetting BearNAS permission markers on data disks"
+  PERM_TARGETS="$SHARE_PATHS"
+  for d in /mnt/disk*/.bearnas-trash; do
+    [ -e "$d" ] && PERM_TARGETS="$PERM_TARGETS
+$d"
+  done
+  [ -d "$BEAR_STORAGE/users" ] && PERM_TARGETS="$PERM_TARGETS
+$BEAR_STORAGE/users"
+  printf '%s\n' "$PERM_TARGETS" | while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    [ -d "$t" ] || continue
+    chgrp root "$t" >/dev/null 2>&1 || true
+    chmod g-s "$t" >/dev/null 2>&1 || true
+    printf '  reset %s\n' "$t"
+  done
 
   if [ "$SMB_MANAGED" = 1 ]; then
     stage "Restoring default smb.conf"
