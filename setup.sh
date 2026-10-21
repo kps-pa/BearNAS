@@ -29,10 +29,11 @@ warn()  { printf '  [WARN] %s\n' "$*"; }
 fail()  { printf '  [FAIL] %s — %s\n' "$1" "$2"; FAILS=$((FAILS+1)); }
 
 usage() {
-  printf 'Usage: bash setup.sh [--install|--uninstall]\n'
-  printf '  --install     install BearNAS\n'
+  printf 'Usage: bash setup.sh [--install|--update|--repair|--uninstall]\n'
+  printf '  --install     install BearNAS (re-run any time to upgrade)\n'
+  printf '  --update      upgrade to the latest version — settings/users/shares are kept\n'
+  printf '  --repair      rewrite the service unit and restart — fixes a broken service\n'
   printf '  --uninstall   remove BearNAS — storage data is never touched\n'
-  printf '  (--update / --repair are reserved — the system is not finished yet)\n'
   printf '  (no argument) menu in a terminal, or default to install when piped\n'
 }
 
@@ -132,6 +133,71 @@ summary() {
   printf '  Storage : %s\n' "$BEAR_STORAGE"
   printf '  Cert    : self-signed — accept the browser warning on first visit\n'
   printf '==============================================\n'
+}
+
+# current_version: อ่านเวอร์ชันที่รันอยู่จาก journal (binary พิมพ์ตอนสตาร์ท)
+current_version() {
+  journalctl -u bearnas --no-pager 2>/dev/null | grep -o 'BearNAS v[0-9][0-9.]*' | tail -1 || true
+}
+
+update_bearnas() {
+  quick_guard
+  if [ ! -x "$INSTALL_DIR/bearnas" ]; then
+    printf 'BearNAS is not installed — nothing to update. Run: bash setup.sh --install\n'
+    exit 0
+  fi
+  OLD_VER="$(current_version)"
+  printf 'Updating BearNAS%s…\n' "${OLD_VER:+ (currently $OLD_VER)}"
+  stage "1/3 Download the latest version"
+  download_bearnas
+  stage "2/3 Service"
+  write_unit
+  stage "3/3 Health check"
+  if wait_health; then
+    ok "BearNAS is responding over HTTPS"
+  else
+    fail "Service" "no response in 15s"
+    show_diag
+    exit 1
+  fi
+  NEW_VER="$(current_version)"
+  printf '  Version: %s → %s\n' "${OLD_VER:-?}" "${NEW_VER:-?}"
+  summary "BearNAS updated"
+  exit 0
+}
+
+repair_bearnas() {
+  quick_guard
+  if [ ! -x "$INSTALL_DIR/bearnas" ]; then
+    printf 'BearNAS is not installed — nothing to repair. Run: bash setup.sh --install\n'
+    exit 0
+  fi
+  stage "Repairing the BearNAS service"
+  if [ -f /etc/systemd/system/bearnas.service ]; then
+    ok "Service unit exists"
+  else
+    warn "Service unit missing — writing a new one"
+  fi
+  write_unit
+  if wait_health; then
+    ok "BearNAS is responding over HTTPS"
+  else
+    fail "Service" "no response in 15s"
+    show_diag
+    exit 1
+  fi
+  # ภาพรวมบริการปลั๊กอินให้ผู้ใช้เห็นครบในรอบเดียว
+  for u in /etc/systemd/system/bearnas-*.service; do
+    [ -e "$u" ] || continue
+    printf '  plugin %s: %s\n' "$(basename "$u" .service)" "$(systemctl is-active "$(basename "$u")" 2>/dev/null || echo unknown)"
+  done
+  if head -1 /etc/samba/smb.conf 2>/dev/null | grep -q 'Managed by BearNAS'; then
+    ok "smb.conf is managed by BearNAS (rewritten on next BearNAS start)"
+  elif command -v smbd >/dev/null 2>&1; then
+    warn "smb.conf is NOT managed by BearNAS — shares will return after BearNAS restarts"
+  fi
+  summary "BearNAS repaired"
+  exit 0
 }
 
 remove_bearnas() {
@@ -270,11 +336,13 @@ if [ -z "$MODE" ]; then
       printf '\n  BearNAS is installed'
       if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service is running'; fi
       printf '\n'
-      printf '\n  1) Uninstall\n'
-      printf '  2) Cancel\n'
-      if ! read -r -p 'Choose [1-2]: ' pick; then pick=""; fi
+      printf '\n  1) Update to the latest version\n'
+      printf '  2) Uninstall\n'
+      printf '  3) Cancel\n'
+      if ! read -r -p 'Choose [1-3]: ' pick; then pick=""; fi
       case "$pick" in
-        1) MODE="--uninstall" ;;
+        1) MODE="--update" ;;
+        2) MODE="--uninstall" ;;
         *) printf 'Cancelled.\n'; exit 0 ;;
       esac
     fi
@@ -285,11 +353,8 @@ fi
 case "$MODE" in
   --install) ;;
   --uninstall)           remove_bearnas ;;
-  --update|--repair)
-    printf '\n%s is not available yet — the system is still under construction.\n' "$MODE"
-    printf 'It will be enabled once the project is complete.\n'
-    exit 0
-    ;;
+  --update)              update_bearnas ;;
+  --repair)              repair_bearnas ;;
   *) usage; exit 1 ;;
 esac
 
@@ -388,6 +453,14 @@ elif [ "$port_busy" = 0 ]; then
   ok "Web port $BEAR_PORT is free"
 else
   fail "Web port $BEAR_PORT" "another program is using this port"
+fi
+# พอร์ต gateway ของ UI ปลั๊กอิน (qBittorrent = 8901) — BearNAS เปิดเองตอนรัน แค่เตือน
+if systemctl is-active --quiet bearnas 2>/dev/null; then
+  :
+elif (exec 3<>"/dev/tcp/127.0.0.1/8901") 2>/dev/null; then
+  warn "Plugin gateway port 8901 is in use by another program — plugin web UI may fail"
+else
+  ok "Plugin gateway port 8901 is free"
 fi
 
 if [ "$FAILS" -gt 0 ]; then
