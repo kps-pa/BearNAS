@@ -55,7 +55,7 @@ download_bearnas() {
     printf '  [FAIL] Download — could not fetch %s\n' "$url"
     exit 1
   fi
-  want="$(curl -fsSL "$DIST_BASE/bearnas-linux-$GOARCH2/bearnas.sha256" 2>/dev/null | awk '{print $1}')"
+  want="$(curl -fsSL "$DIST_BASE/bearnas-linux-$GOARCH2/bearnas.sha256" 2>/dev/null | awk '{print $1}' || true)"
   got="$(sha256sum "$INSTALL_DIR/bearnas.tmp" 2>/dev/null | awk '{print $1}')"
   if [ -n "$want" ] && [ -n "$got" ]; then
     if [ "$got" != "$want" ]; then
@@ -153,7 +153,7 @@ remove_bearnas() {
   SHARE_PATHS=""
   if [ -f /etc/samba/smb.conf ] && head -1 /etc/samba/smb.conf | grep -q 'Managed by BearNAS'; then
     SMB_MANAGED=1
-    SHARE_PATHS="$(grep -E '^[[:space:]]*path[[:space:]]*=' /etc/samba/smb.conf | sed -E 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//' | sort -u)"
+    SHARE_PATHS="$(grep -E '^[[:space:]]*path[[:space:]]*=' /etc/samba/smb.conf | sed -E 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//' | sort -u || true)"
   fi
 
   printf 'This stops BearNAS and deletes:\n'
@@ -189,7 +189,7 @@ remove_bearnas() {
     for u in $members; do
       [ -n "$u" ] || continue
       if command -v smbpasswd >/dev/null 2>&1; then smbpasswd -x "$u" >/dev/null 2>&1 || true; fi
-      shell="$(getent passwd "$u" | cut -d: -f7)"
+      shell="$(getent passwd "$u" | cut -d: -f7 || true)"
       case "$shell" in
         */nologin|*/false) userdel "$u" >/dev/null 2>&1 || true ;;
         *) printf '  kept login user %s (not created by BearNAS)\n' "$u" ;;
