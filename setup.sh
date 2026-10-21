@@ -157,8 +157,8 @@ remove_bearnas() {
   fi
 
   printf 'This stops BearNAS and deletes:\n'
-  printf '  - bearnas.service\n'
-  printf '  - %s (binary, certificate, settings db, device key)\n' "$INSTALL_DIR"
+  printf '  - bearnas.service and any plugin services (bearnas-*.service)\n'
+  printf '  - %s (binary, certificate, settings db, device key, plugin files)\n' "$INSTALL_DIR"
   if [ "$SMB_MANAGED" = 1 ]; then
     printf '  - /etc/samba/smb.conf written by BearNAS (all BearNAS shares stop)\n'
   fi
@@ -180,6 +180,13 @@ remove_bearnas() {
   stage "Stopping BearNAS"
   systemctl disable --now bearnas >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/bearnas.service
+  # บริการของปลั๊กอิน (bearnas-qbittorrent ฯลฯ) — ต้องหยุดก่อนลบบัญชี ไม่งั้น userdel ไม่ผ่าน
+  # (ตัวไบนารี/โปรไฟล์ของปลั๊กอินอยู่ใต้ INSTALL_DIR → หายตาม rm -rf ด้านล่างเอง)
+  for unit_file in /etc/systemd/system/bearnas-*.service; do
+    [ -e "$unit_file" ] || continue
+    systemctl disable --now "$(basename "$unit_file")" >/dev/null 2>&1 || true
+    rm -f "$unit_file"
+  done
   systemctl daemon-reload
 
   stage "Removing Samba accounts created by BearNAS"
