@@ -23,16 +23,28 @@ BEAR_STORAGE="${BEAR_STORAGE:-/mnt/disk1}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/bearnas}"
 DIST_BASE="${DIST_BASE:-https://raw.githubusercontent.com/kps-pa/BearNAS/main/dist}"
 
+# สถาปัตยกรรมของเครื่อง — ต้องรู้ตั้งแต่ต้นสคริปต์ (download_bearnas ใช้ทุกโหมด ไม่ใช่แค่ --install)
+# คำสั่งเจ้าของ: build เฉพาะ linux/amd64 — arm64 ไม่มี binary ให้ จึงปฏิเสศตั้งแต่ต้น ไม่ใช่พังกลางทางตอนดาวน์โหลด
+case "$(uname -m)" in
+  x86_64)        GOARCH2=amd64 ;;
+  aarch64|arm64) GOARCH2="" ;;
+  *)             GOARCH2="" ;;
+esac
+
 stage() { printf '\n==> %s\n' "$*"; }
 ok()    { printf '  [OK]   %s\n' "$*"; }
 warn()  { printf '  [WARN] %s\n' "$*"; }
 fail()  { printf '  [FAIL] %s — %s\n' "$1" "$2"; FAILS=$((FAILS+1)); }
 
+# ตัวนับปัญหาของ fail() — ตั้งต้นไว้ตั้งแต่ต้นสคริปต์ (โหมด --update/--repair ไม่ผ่าน stage 1)
+FAILS=0
+
 usage() {
-  printf 'Usage: bash setup.sh [--install|--uninstall]\n'
-  printf '  --install     install BearNAS\n'
+  printf 'Usage: bash setup.sh [--install|--update|--repair|--uninstall]\n'
+  printf '  --install     install BearNAS (re-run to upgrade)\n'
+  printf '  --update      download the latest build from GitHub and restart\n'
+  printf '  --repair      check the installation and fix what is broken\n'
   printf '  --uninstall   remove BearNAS — storage data is never touched\n'
-  printf '  (--update / --repair are reserved — the system is not finished yet)\n'
   printf '  (no argument) menu in a terminal, or default to install when piped\n'
 }
 
@@ -47,11 +59,26 @@ quick_guard() {
   fi
 }
 
+# อ่านค่าที่ "ติดตั้งจริง" จาก unit file (พอร์ต/ดิสก์อาจไม่ใช่ค่า default ของ env วันนี้)
+read_unit_env() {
+  if [ -f /etc/systemd/system/bearnas.service ]; then
+    _p="$(grep -o '^Environment=BEAR_PORT=[0-9]\+' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3)"
+    _s="$(grep -o '^Environment=BEAR_STORAGE=[^ ]*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3)"
+    [ -n "$_p" ] && BEAR_PORT="$_p"
+    [ -n "$_s" ] && BEAR_STORAGE="$_s"
+  fi
+}
+
 download_bearnas() {
+  if [ -z "$GOARCH2" ]; then
+    printf '  [FAIL] Download — no build for this CPU architecture (%s)\n' "$(uname -m)"
+    exit 1
+  fi
   url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
   echo "  From: $url"
   mkdir -p "$INSTALL_DIR"
   if ! curl -fsSL -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
+    rm -f "$INSTALL_DIR/bearnas.tmp"
     printf '  [FAIL] Download — could not fetch %s\n' "$url"
     exit 1
   fi
@@ -136,6 +163,7 @@ summary() {
 
 remove_bearnas() {
   quick_guard
+  read_unit_env
   case "$INSTALL_DIR" in
     ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home")
       printf 'Refusing to delete INSTALL_DIR=%s\n' "$INSTALL_DIR"
@@ -248,6 +276,145 @@ $BEAR_STORAGE/users"
   exit 0
 }
 
+### ── Update: ดาวน์โหลด build ล่าสุดจาก GitHub + รีสตาร์ท (ข้อมูลผู้ใช้ไม่ถูกแตะ) ──
+update_bearnas() {
+  quick_guard
+  read_unit_env
+  if [ ! -x "$INSTALL_DIR/bearnas" ]; then
+    printf 'BearNAS is not installed yet — run: bash setup.sh --install\n'
+    exit 1
+  fi
+  if [ ! -f /etc/systemd/system/bearnas.service ]; then
+    printf 'Service unit file is missing — run: bash setup.sh --repair\n'
+    exit 1
+  fi
+  stage "Current build"
+  CUR_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
+  printf '  Installed: %s…\n' "${CUR_SHA:0:12}"
+
+  # สำรองตัวเดิมก่อนแตะ — ถ้าตัวใหม่ลุกไม่ขึ้น กู้คืนให้เอง (ตามที่ตัวอัปเดตบนเว็บทำ)
+  cp -p "$INSTALL_DIR/bearnas" "$INSTALL_DIR/bearnas.bak"
+
+  stage "Downloading the latest build"
+  download_bearnas
+  NEW_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
+
+  if [ "$CUR_SHA" = "$NEW_SHA" ]; then
+    ok "Already up to date — same build as on GitHub"
+    rm -f "$INSTALL_DIR/bearnas.bak"
+    summary "BearNAS is up to date"
+    exit 0
+  fi
+
+  stage "Restarting service"
+  printf '  Updated: %s… → %s…\n' "${CUR_SHA:0:12}" "${NEW_SHA:0:12}"
+  systemctl restart bearnas
+  if wait_health; then
+    ok "BearNAS is responding over HTTPS"
+    rm -f "$INSTALL_DIR/bearnas.bak"
+  else
+    fail "Service" "no response in 15s — rolling back to the previous build"
+    cp -p "$INSTALL_DIR/bearnas.bak" "$INSTALL_DIR/bearnas"
+    rm -f "$INSTALL_DIR/bearnas.bak"
+    systemctl restart bearnas
+    if wait_health; then
+      ok "Rolled back — the previous build is running again"
+    else
+      warn "Rollback did not come up either — check: journalctl -u bearnas -n 50"
+    fi
+    show_diag
+    exit 1
+  fi
+  summary "BearNAS updated"
+  exit 0
+}
+
+### ── Repair: ตรวจทีละจุดแล้วซ่อมให้ (ข้อมูลผู้ใช้/ดิสก์ไม่ถูกแตะ) ──
+repair_bearnas() {
+  quick_guard
+  read_unit_env
+  printf 'BearNAS Repair — checks everything and fixes what it can.\n\n'
+  REPAIRED=0
+
+  stage "Binary"
+  NEED_DL=0
+  if [ ! -f "$INSTALL_DIR/bearnas" ]; then
+    warn "Binary missing — will download"
+    NEED_DL=1
+  elif [ "$(head -c4 "$INSTALL_DIR/bearnas" 2>/dev/null)" != "$(printf '\177ELF')" ]; then
+    warn "Binary is not a Linux executable — will download"
+    NEED_DL=1
+  elif [ ! -x "$INSTALL_DIR/bearnas" ]; then
+    chmod 755 "$INSTALL_DIR/bearnas"
+    ok "Execute permission restored"
+    REPAIRED=$((REPAIRED+1))
+  else
+    ok "Binary present"
+  fi
+  if [ "$NEED_DL" = 1 ]; then
+    download_bearnas
+    REPAIRED=$((REPAIRED+1))
+  fi
+
+  stage "Service unit"
+  if [ -f /etc/systemd/system/bearnas.service ]; then
+    ok "Unit file present"
+  else
+    warn "Unit file missing — rewriting"
+    write_unit
+    REPAIRED=$((REPAIRED+1))
+  fi
+
+  stage "Group and folders"
+  if ! getent group bearnas >/dev/null 2>&1; then
+    groupadd -f bearnas
+    ok "Group bearnas re-created"
+    REPAIRED=$((REPAIRED+1))
+  else
+    ok "Group bearnas present"
+  fi
+  if [ -d "$INSTALL_DIR" ]; then
+    ok "Install folder $INSTALL_DIR present"
+  else
+    mkdir -p "$INSTALL_DIR"
+    ok "Install folder re-created"
+    REPAIRED=$((REPAIRED+1))
+  fi
+  if [ -d "$BEAR_STORAGE" ]; then
+    ok "Storage $BEAR_STORAGE present"
+  else
+    warn "Storage $BEAR_STORAGE not found — check the disk, then re-run --install"
+  fi
+
+  stage "Restart"
+  systemctl daemon-reload
+  systemctl enable bearnas >/dev/null 2>&1 || true
+  systemctl restart bearnas
+  if wait_health; then
+    ok "BearNAS is responding over HTTPS"
+  else
+    fail "Service" "no response in 15s"
+    show_diag
+    exit 1
+  fi
+  printf '\n'
+  if [ "$REPAIRED" = 0 ]; then
+    summary "Nothing was broken — everything checked out"
+  else
+    summary "Repaired $REPAIRED item(s) — BearNAS is ready"
+  fi
+  exit 0
+}
+
+### ── Single-run lock (กันรันซ้อนสอง session — ครอบทุกโหมด ไม่ใช่แค่ install) ──
+if [ -d /run ] && [ -w /run ]; then
+  exec 9>/run/bearnas-setup.lock
+  if ! flock -n 9; then
+    printf 'Another setup.sh is already running.\n'
+    exit 1
+  fi
+fi
+
 ### ── Mode selection ──
 INSTALLED=0
 if [ -f /etc/systemd/system/bearnas.service ] || [ -x "$INSTALL_DIR/bearnas" ]; then
@@ -270,11 +437,15 @@ if [ -z "$MODE" ]; then
       printf '\n  BearNAS is installed'
       if systemctl is-active --quiet bearnas 2>/dev/null; then printf ' — service is running'; fi
       printf '\n'
-      printf '\n  1) Uninstall\n'
-      printf '  2) Cancel\n'
-      if ! read -r -p 'Choose [1-2]: ' pick; then pick=""; fi
+      printf '\n  1) Update to the latest version\n'
+      printf '  2) Repair installation\n'
+      printf '  3) Uninstall\n'
+      printf '  4) Cancel\n'
+      if ! read -r -p 'Choose [1-4]: ' pick; then pick=""; fi
       case "$pick" in
-        1) MODE="--uninstall" ;;
+        1) MODE="--update" ;;
+        2) MODE="--repair" ;;
+        3) MODE="--uninstall" ;;
         *) printf 'Cancelled.\n'; exit 0 ;;
       esac
     fi
@@ -285,22 +456,10 @@ fi
 case "$MODE" in
   --install) ;;
   --uninstall)           remove_bearnas ;;
-  --update|--repair)
-    printf '\n%s is not available yet — the system is still under construction.\n' "$MODE"
-    printf 'It will be enabled once the project is complete.\n'
-    exit 0
-    ;;
+  --update)              update_bearnas ;;
+  --repair)              repair_bearnas ;;
   *) usage; exit 1 ;;
 esac
-
-### ── Single-run lock (กันรันซ้อนสอง session) ──
-if [ -d /run ] && [ -w /run ]; then
-  exec 9>/run/bearnas-setup.lock
-  if ! flock -n 9; then
-    printf 'Another setup.sh is already running.\n'
-    exit 1
-  fi
-fi
 
 ### ═══ Stage 1/6 — System check ═══
 stage "1/6 System check"
@@ -322,11 +481,7 @@ else
 fi
 
 cpu_model="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
-case "$(uname -m)" in
-  x86_64)        GOARCH2=amd64 ;;
-  aarch64|arm64) GOARCH2=arm64 ;;
-  *) GOARCH2="" ;;
-esac
+# GOARCH2 ตั้งไว้แล้วตั้งแต่ต้นสคริปต์ (amd64 เท่านั้น — คำสั่งเจ้าของ)
 kernel_ver="$(uname -r)"
 ok "Kernel ${kernel_ver:-unknown}"
 
