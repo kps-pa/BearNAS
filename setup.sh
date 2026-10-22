@@ -63,7 +63,8 @@ quick_guard() {
 read_unit_env() {
   if [ -f /etc/systemd/system/bearnas.service ]; then
     _p="$(grep -o '^Environment=BEAR_PORT=[0-9]\+' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3)"
-    _s="$(grep -o '^Environment=BEAR_STORAGE=[^ ]*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3)"
+    # -f3- เก็บค่าทั้งหมดหลัง '=' ที่สอง — พาธอย่าง /mnt/d=1 ต้องไม่ถูกตัดเหลือ /mnt/d
+    _s="$(grep -o '^Environment=BEAR_STORAGE=[^ ]*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3-)"
     [ -n "$_p" ] && BEAR_PORT="$_p"
     [ -n "$_s" ] && BEAR_STORAGE="$_s"
   fi
@@ -77,23 +78,20 @@ download_bearnas() {
   url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
   echo "  From: $url"
   mkdir -p "$INSTALL_DIR"
-  if ! curl -fsSL -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
+  if ! curl -fsSL --max-time 600 -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
     rm -f "$INSTALL_DIR/bearnas.tmp"
     printf '  [FAIL] Download — could not fetch %s\n' "$url"
     exit 1
   fi
-  want="$(curl -fsSL "$DIST_BASE/bearnas-linux-$GOARCH2/bearnas.sha256" 2>/dev/null | awk '{print $1}' || true)"
+  want="$(curl -fsSL --max-time 30 "$DIST_BASE/bearnas-linux-$GOARCH2/bearnas.sha256" 2>/dev/null | awk '{print $1}' || true)"
   got="$(sha256sum "$INSTALL_DIR/bearnas.tmp" 2>/dev/null | awk '{print $1}')"
-  if [ -n "$want" ] && [ -n "$got" ]; then
-    if [ "$got" != "$want" ]; then
-      printf '  [FAIL] Download — checksum mismatch\n'
-      rm -f "$INSTALL_DIR/bearnas.tmp"
-      exit 1
-    fi
-    ok "Download verified — checksum matches"
-  else
-    echo "  (checksum skipped — file or tool missing)"
+  # fail-closed: อ่าน checksum ไม่ได้ = ยกเลิก ไม่ติดตั้ง binary ที่ตรวจไม่ได้ (เคยข้ามเฉย ๆ)
+  if [ -z "$want" ] || [ -z "$got" ] || [ "$got" != "$want" ]; then
+    printf '  [FAIL] Download — checksum missing or mismatch\n'
+    rm -f "$INSTALL_DIR/bearnas.tmp"
+    exit 1
   fi
+  ok "Download verified — checksum matches"
   mv -f "$INSTALL_DIR/bearnas.tmp" "$INSTALL_DIR/bearnas"
   chmod 755 "$INSTALL_DIR/bearnas"
   ok "BearNAS binary installed — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
@@ -129,7 +127,8 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable bearnas >/dev/null 2>&1
+  # enable ล้ม (systemd พัง/พื้นที่ไม่พอ) ไม่ใช่เหตุให้ติดตั้งค้างกลางทาง — restart ต่างหากคือด่านจริง
+  systemctl enable bearnas >/dev/null 2>&1 || true
   systemctl restart bearnas
   ok "BearNAS service installed and started"
 }
@@ -137,7 +136,7 @@ UNIT
 wait_health() {
   local _u=0 _i
   for _i in $(seq 1 15); do
-    if curl -fsk "https://127.0.0.1:$BEAR_PORT/api/status" >/dev/null 2>&1; then _u=1; break; fi
+    if curl -fsk --max-time 3 "https://127.0.0.1:$BEAR_PORT/api/status" >/dev/null 2>&1; then _u=1; break; fi
     sleep 1
   done
   [ "$_u" = 1 ]
@@ -164,8 +163,10 @@ summary() {
 remove_bearnas() {
   quick_guard
   read_unit_env
+  # normalize ก่อนเทียบ blocklist — "/usr/" หรือ "/opt/." ต้องถูกจับเหมือน "/usr"
+  INSTALL_DIR="${INSTALL_DIR%/}"
   case "$INSTALL_DIR" in
-    ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home")
+    ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home"|"/boot"|"/sbin"|"/usr/bin"|"/usr/lib")
       printf 'Refusing to delete INSTALL_DIR=%s\n' "$INSTALL_DIR"
       exit 1
       ;;
@@ -299,7 +300,8 @@ update_bearnas() {
   download_bearnas
   NEW_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
 
-  if [ "$CUR_SHA" = "$NEW_SHA" ]; then
+  # sha ว่างทั้งคู่ (sha256sum พัง) ไม่ใช่ "เหมือนกัน" — ถือว่าไม่เท่ากัน ไปตาม flow อัปเดตปกติ
+  if [ -n "$CUR_SHA" ] && [ -n "$NEW_SHA" ] && [ "$CUR_SHA" = "$NEW_SHA" ]; then
     ok "Already up to date — same build as on GitHub"
     rm -f "$INSTALL_DIR/bearnas.bak"
     summary "BearNAS is up to date"
@@ -308,7 +310,9 @@ update_bearnas() {
 
   stage "Restarting service"
   printf '  Updated: %s… → %s…\n' "${CUR_SHA:0:12}" "${NEW_SHA:0:12}"
-  systemctl restart bearnas
+  # || true เพื่อให้ไหลต่อไปที่ wait_health เสมอ — restart คืน non-zero เอง (systemd แปลก ๆ)
+  # เดิม set -e จะออกก่อนถึงด่านตรวจสุขภาพ = binary ใหม่วางแล้วแต่ rollback ไม่ได้พิจารณา
+  systemctl restart bearnas || true
   if wait_health; then
     ok "BearNAS is responding over HTTPS"
     rm -f "$INSTALL_DIR/bearnas.bak"
@@ -407,12 +411,16 @@ repair_bearnas() {
 }
 
 ### ── Single-run lock (กันรันซ้อนสอง session — ครอบทุกโหมด ไม่ใช่แค่ install) ──
+# ถ้า /run ใช้ไม่ได้ก็ "ห้ามรันเงียบ ๆ" โดยไม่มีล็อก — สอง session ซ้อนแย่งเขียน binary ได้
 if [ -d /run ] && [ -w /run ]; then
   exec 9>/run/bearnas-setup.lock
   if ! flock -n 9; then
     printf 'Another setup.sh is already running.\n'
     exit 1
   fi
+elif [ "$(id -u)" = 0 ]; then
+  printf 'Cannot lock /run (not writable?) — refusing to run without the lock.\n'
+  exit 1
 fi
 
 ### ── Mode selection ──
@@ -544,6 +552,17 @@ elif [ "$port_busy" = 0 ]; then
 else
   fail "Web port $BEAR_PORT" "another program is using this port"
 fi
+
+# พาธเก็บข้อมูลต้องเป็น absolute ไม่มีช่องว่าง/บรรทัดใหม่ — มันถูกฝังลงบรรทัด
+# Environment= ของ unit file ตรง ๆ (ค่าเพี้ยน = unit เสียทั้งไฟล์)
+case "$BEAR_STORAGE" in
+  /*) ;;
+  *) fail "Storage path" "must be an absolute path (got: $BEAR_STORAGE)" ;;
+esac
+case "$BEAR_STORAGE" in
+  *[[:space:],%]*) fail "Storage path" "must not contain spaces or newlines (got: $BEAR_STORAGE)" ;;
+  *) ok "Storage path $BEAR_STORAGE is a valid unit-file value" ;;
+esac
 # พอร์ต gateway ของ UI ปลั๊กอิน (qBittorrent = 8901) — BearNAS เปิดเองตอนรัน แค่เตือน
 if systemctl is-active --quiet bearnas 2>/dev/null; then
   :
