@@ -81,6 +81,19 @@ bin_version() {
   esac
 }
 
+# unit ที่เขียนไว้เมื่อรุ่นก่อนอาจขาดค่าใหม่ (เช่น UMask=0002 ที่มา after v0.7.0) —
+# เทียบไม่ได้ทั้งไฟล์ก็เช็คทีละ marker ที่สำคัญ ขาด = เขียนใหม่ด้วยค่าปัจจุบัน
+# (read_unit_env วิ่งก่อนแล้วเสมอ พอร์ต/ดิสก์จึงคงค่าที่ติดตั้งจริง ไม่ใช่ default)
+ensure_unit_current() {
+  if [ ! -f /etc/systemd/system/bearnas.service ]; then
+    return 1
+  fi
+  if ! grep -q '^UMask=0002$' /etc/systemd/system/bearnas.service; then
+    return 1
+  fi
+  return 0
+}
+
 download_bearnas() {
   if [ -z "$GOARCH2" ]; then
     printf '  [FAIL] Download — no build for this CPU architecture (%s)\n' "$(uname -m)"
@@ -130,6 +143,10 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 LockPersonality=yes
+# 0002 = ไฟล์/โฟลเดอร์ที่ service สร้างให้กลุ่ม bearnas เขียนได้ (โฟลเดอร์ร่วมบนดิสก์ข้อมูล
+# ถูก chmod ชัดอยู่แล้ว — ตัวนี้เป็นเบาะกันเหตุสุดท้าย เคยโดน umask default 0022 ตัดบิตกลุ่ม
+# จนงานโหลดวิดีโอเขียนไฟล์ไม่ได้ [Errno 13])
+UMask=0002
 Environment=BEAR_PORT=$BEAR_PORT
 Environment=BEAR_STORAGE=$BEAR_STORAGE
 ExecStart=$INSTALL_DIR/bearnas
@@ -149,7 +166,8 @@ UNIT
 wait_health() {
   local _u=0 _i
   for _i in $(seq 1 15); do
-    if curl -fsk --max-time 3 "https://127.0.0.1:$BEAR_PORT/api/status" >/dev/null 2>&1; then _u=1; break; fi
+    # /api/v1/setup/status ถูกยกเว้นจาก rate limit ฝั่งแอป (เป็น health-check หลักของหน้าเว็บด้วย)
+    if curl -fsk --max-time 3 "https://127.0.0.1:$BEAR_PORT/api/v1/setup/status" >/dev/null 2>&1; then _u=1; break; fi
     sleep 1
   done
   [ "$_u" = 1 ]
@@ -170,6 +188,7 @@ summary() {
   printf '  Service : systemctl status bearnas\n'
   printf '  Storage : %s\n' "$BEAR_STORAGE"
   printf '  Cert    : self-signed — accept the browser warning on first visit\n'
+  printf '  Plugins : qBittorrent / Video Downloader — install from the web UI\n'
   printf '==============================================\n'
 }
 
@@ -327,6 +346,13 @@ update_bearnas() {
     exit 0
   fi
 
+  # unit รุ่นเก่า (ก่อน v0.7.0) ไม่มี UMask=0002 — เขียนใหม่พร้อมค่าที่อ่านจาก unit เดิม
+  if ! ensure_unit_current; then
+    stage "Refreshing service unit"
+    warn "Unit file is outdated — rewriting (adds UMask=0002)"
+    write_unit
+  fi
+
   stage "Restarting service"
   printf '  Updated: %s → %s\n' "${CUR_VER:-${CUR_SHA:0:12}…}" "${NEW_VER:-${NEW_SHA:0:12}…}"
   # || true เพื่อให้ไหลต่อไปที่ wait_health เสมอ — restart คืน non-zero เอง (systemd แปลก ๆ)
@@ -380,12 +406,16 @@ repair_bearnas() {
   fi
 
   stage "Service unit"
-  if [ -f /etc/systemd/system/bearnas.service ]; then
-    ok "Unit file present"
-  else
+  if [ ! -f /etc/systemd/system/bearnas.service ]; then
     warn "Unit file missing — rewriting"
     write_unit
     REPAIRED=$((REPAIRED+1))
+  elif ! ensure_unit_current; then
+    warn "Unit file outdated (no UMask=0002) — rewriting"
+    write_unit
+    REPAIRED=$((REPAIRED+1))
+  else
+    ok "Unit file present and current"
   fi
 
   stage "Group and folders"
@@ -552,6 +582,12 @@ if [ "${free_mb:-0}" -ge 100 ]; then
   ok "System disk has enough space — $free_gb free"
 else
   fail "System disk" "only ${free_gb:-?} free, at least 100MB is required"
+fi
+# ปลั๊กอินอยู่บนดิสก์ระบบทั้งหมด (yt-dlp+ffmpeg ~200MB · ตัวช่วยล็อกอินเว็บ ~500MB)
+if [ "${free_mb:-0}" -ge 1024 ]; then
+  ok "System disk space for plugins — $free_gb free"
+else
+  warn "Only ${free_gb:-?} free — plugins need room on the system disk (login helper ~500MB)"
 fi
 
 port_bad=0
