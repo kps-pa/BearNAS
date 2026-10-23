@@ -338,19 +338,34 @@ update_bearnas() {
   NEW_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
   NEW_VER="$(bin_version "$INSTALL_DIR/bearnas")"
 
-  # sha ว่างทั้งคู่ (sha256sum พัง) ไม่ใช่ "เหมือนกัน" — ถือว่าไม่เท่ากัน ไปตาม flow อัปเดตปกติ
-  if [ -n "$CUR_SHA" ] && [ -n "$NEW_SHA" ] && [ "$CUR_SHA" = "$NEW_SHA" ]; then
-    ok "Already up to date${NEW_VER:+ — version $NEW_VER} (same build as on GitHub)"
-    rm -f "$INSTALL_DIR/bearnas.bak"
-    summary "BearNAS is up to date${NEW_VER:+ — $NEW_VER}"
-    exit 0
-  fi
-
-  # unit รุ่นเก่า (ก่อน v0.7.0) ไม่มี UMask=0002 — เขียนใหม่พร้อมค่าที่อ่านจาก unit เดิม
+  # unit รุ่นเก่า (ก่อน v0.7.1) ไม่มี UMask=0002 — เขียนใหม่ก่อนด่าน up-to-date เสมอ
+  # (เดิมไว้หลังด่านนี้ = binary ล่าสุดแล้วจะ exit ก่อน ไม่มีวันได้ unit ใหม่ ทั้งที่คนรัน
+  #  setup.sh ก็มักเพื่อมาเอาส่วนนี้และรีสตาร์ตให้ครบ) · write_unit รวม restart อยู่ในตัว
+  UNIT_REFRESHED=0
   if ! ensure_unit_current; then
     stage "Refreshing service unit"
     warn "Unit file is outdated — rewriting (adds UMask=0002)"
     write_unit
+    UNIT_REFRESHED=1
+    if wait_health; then
+      ok "Restarted with the refreshed unit — responding over HTTPS"
+    else
+      fail "Service" "no response in 15s after unit refresh"
+      show_diag
+      exit 1
+    fi
+  fi
+
+  # sha ว่างทั้งคู่ (sha256sum พัง) ไม่ใช่ "เหมือนกัน" — ถือว่าไม่เท่ากัน ไปตาม flow อัปเดตปกติ
+  if [ -n "$CUR_SHA" ] && [ -n "$NEW_SHA" ] && [ "$CUR_SHA" = "$NEW_SHA" ]; then
+    rm -f "$INSTALL_DIR/bearnas.bak"
+    if [ "$UNIT_REFRESHED" = 1 ]; then
+      summary "BearNAS is up to date${NEW_VER:+ — $NEW_VER} · service unit refreshed and restarted"
+    else
+      ok "Already up to date${NEW_VER:+ — version $NEW_VER} (same build as on GitHub)"
+      summary "BearNAS is up to date${NEW_VER:+ — $NEW_VER}"
+    fi
+    exit 0
   fi
 
   stage "Restarting service"
