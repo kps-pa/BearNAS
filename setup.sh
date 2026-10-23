@@ -70,6 +70,17 @@ read_unit_env() {
   fi
 }
 
+# เวอร์ชันจากตัว binary เอง (ธง --version ของ BearNAS) — คืนว่างเมื่อใช้ไม่ได้:
+# binary เก่าก่อนมีธงนี้จะลงมือรันเซิร์ฟเวอร์เลย (timeout กันค้าง) หรือผลลัพธ์ไม่ใช่
+# รูปแบบ x.y.z (ไฟล์เสีย) — ผู้เรียกต้องมี fallback เป็น sha เสมอ
+bin_version() {
+  _v="$(timeout 5 "$1" --version 2>/dev/null | head -1 || true)"
+  case "$_v" in
+    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$_v" ;;
+    *) ;;
+  esac
+}
+
 download_bearnas() {
   if [ -z "$GOARCH2" ]; then
     printf '  [FAIL] Download — no build for this CPU architecture (%s)\n' "$(uname -m)"
@@ -88,13 +99,15 @@ download_bearnas() {
   # fail-closed: อ่าน checksum ไม่ได้ = ยกเลิก ไม่ติดตั้ง binary ที่ตรวจไม่ได้ (เคยข้ามเฉย ๆ)
   if [ -z "$want" ] || [ -z "$got" ] || [ "$got" != "$want" ]; then
     printf '  [FAIL] Download — checksum missing or mismatch\n'
+    printf '         GitHub CDN can lag a few minutes after a release — wait and retry.\n'
     rm -f "$INSTALL_DIR/bearnas.tmp"
     exit 1
   fi
   ok "Download verified — checksum matches"
   mv -f "$INSTALL_DIR/bearnas.tmp" "$INSTALL_DIR/bearnas"
   chmod 755 "$INSTALL_DIR/bearnas"
-  ok "BearNAS binary installed — $(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
+  DL_VER="$(bin_version "$INSTALL_DIR/bearnas")"
+  ok "BearNAS binary installed — ${DL_VER:+version $DL_VER · }$(du -h "$INSTALL_DIR/bearnas" | cut -f1)"
 }
 
 write_unit() {
@@ -291,7 +304,12 @@ update_bearnas() {
   fi
   stage "Current build"
   CUR_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
-  printf '  Installed: %s…\n' "${CUR_SHA:0:12}"
+  CUR_VER="$(bin_version "$INSTALL_DIR/bearnas")"
+  if [ -n "$CUR_VER" ]; then
+    printf '  Installed: version %s (build %s…)\n' "$CUR_VER" "${CUR_SHA:0:12}"
+  else
+    printf '  Installed: %s…\n' "${CUR_SHA:0:12}"
+  fi
 
   # สำรองตัวเดิมก่อนแตะ — ถ้าตัวใหม่ลุกไม่ขึ้น กู้คืนให้เอง (ตามที่ตัวอัปเดตบนเว็บทำ)
   cp -p "$INSTALL_DIR/bearnas" "$INSTALL_DIR/bearnas.bak"
@@ -299,17 +317,18 @@ update_bearnas() {
   stage "Downloading the latest build"
   download_bearnas
   NEW_SHA="$(sha256sum "$INSTALL_DIR/bearnas" 2>/dev/null | awk '{print $1}')"
+  NEW_VER="$(bin_version "$INSTALL_DIR/bearnas")"
 
   # sha ว่างทั้งคู่ (sha256sum พัง) ไม่ใช่ "เหมือนกัน" — ถือว่าไม่เท่ากัน ไปตาม flow อัปเดตปกติ
   if [ -n "$CUR_SHA" ] && [ -n "$NEW_SHA" ] && [ "$CUR_SHA" = "$NEW_SHA" ]; then
-    ok "Already up to date — same build as on GitHub"
+    ok "Already up to date${NEW_VER:+ — version $NEW_VER} (same build as on GitHub)"
     rm -f "$INSTALL_DIR/bearnas.bak"
-    summary "BearNAS is up to date"
+    summary "BearNAS is up to date${NEW_VER:+ — $NEW_VER}"
     exit 0
   fi
 
   stage "Restarting service"
-  printf '  Updated: %s… → %s…\n' "${CUR_SHA:0:12}" "${NEW_SHA:0:12}"
+  printf '  Updated: %s → %s\n' "${CUR_VER:-${CUR_SHA:0:12}…}" "${NEW_VER:-${NEW_SHA:0:12}…}"
   # || true เพื่อให้ไหลต่อไปที่ wait_health เสมอ — restart คืน non-zero เอง (systemd แปลก ๆ)
   # เดิม set -e จะออกก่อนถึงด่านตรวจสุขภาพ = binary ใหม่วางแล้วแต่ rollback ไม่ได้พิจารณา
   systemctl restart bearnas || true
@@ -329,7 +348,7 @@ update_bearnas() {
     show_diag
     exit 1
   fi
-  summary "BearNAS updated"
+  summary "BearNAS updated${NEW_VER:+ — now on $NEW_VER}"
   exit 0
 }
 
