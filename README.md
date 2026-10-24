@@ -58,12 +58,12 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
 ```sh
 pveam update
 pveam download local debian-13-standard
-pct create 120 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
+pct create 100 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname bearnas --unprivileged 1 \
   --cores 2 --memory 1024 --rootfs local-lvm:8 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1 \
   --start 1
-pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next section
+pct set 100 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next section
 ```
 
 `pveam download` accepts the short name `debian-13-standard` and fetches the
@@ -113,7 +113,7 @@ your disk, and note that steps 2–3 **erase everything on it**.
 4. Bind-mount it into the container:
 
    ```sh
-   pct set 120 -mp0 /mnt/pve/bearnas-data,mp=/mnt/disk1,idmap=passthrough
+   pct set 100 -mp0 /mnt/pve/bearnas-data,mp=/mnt/disk1,idmap=passthrough
    ```
 
 `idmap=passthrough` keeps ownership on the mount as it is on the disk —
@@ -132,7 +132,7 @@ GUI: `CT → Resources → Add → Mount point` (pick a storage and size, mount
 point `/mnt/disk1`), or CLI:
 
 ```sh
-pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1
+pct set 100 --mp0 local-lvm:200,mp=/mnt/disk1
 ```
 
 Proxmox formats the volume automatically and ownership works out of the box —
@@ -143,8 +143,8 @@ the data just shares the host's storage pool instead of living on its own disk.
 Restart the container so the new mount point appears, then check:
 
 ```sh
-pct reboot 120
-pct enter 120
+pct reboot 100
+pct enter 100
 df -h /mnt/disk1
 ```
 
@@ -172,7 +172,7 @@ Then attach it — Proxmox VE 8.2 or newer:
 - **Shell:**
 
   ```sh
-  pct set 120 --dev0 path=/dev/dri/renderD128
+  pct set 100 --dev0 path=/dev/dri/renderD128
   ```
 
 Add `uid=0,gid=0,mode=666` to the `--dev0` line if programs inside an
@@ -273,5 +273,5 @@ On the Proxmox side:
   packages first (`apt update && apt full-upgrade` on the host, then
   `pveam update` and re-download). Older Proxmox container packages predate
   Debian 13.
-- The data disk is not visible inside the container → check `pct config 120`
+- The data disk is not visible inside the container → check `pct config 100`
   for the `mp0:` line, and that the container was restarted after adding it.
