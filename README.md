@@ -19,6 +19,7 @@ you need.
 | OS | Debian 13 (tested) or Debian 12, 64-bit x86 (amd64) — there is no ARM version |
 | Access | root inside the container — from the Proxmox host: `pct enter <CT-ID>` |
 | System disk | 100 MB free minimum; 1 GB+ recommended, plugins are installed here (Video Downloader ≈ 200 MB, web-login helper ≈ 500 MB) |
+| CPU / RAM | 2 cores · 1024 MB — 2048 MB of memory if you will use the Video Downloader plugin |
 | Data disk | one mounted volume for your files — default `/mnt/disk1` |
 | Network | internet access (the program downloads from GitHub, packages via apt) |
 | Ports | `8900` web UI (HTTPS) · `8901` plugin gateway |
@@ -41,9 +42,9 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
    - **Template** — Debian 13 standard
    - **Disks** — 8 GB root disk (the program, its settings and the plugins all
      live here)
-   - **CPU** — 2 cores
-   - **Memory** — 2048 MB (1 GB works, but the video login helper runs a real
-     browser, so 2 GB+ is comfortable)
+   - **CPU** — 2 cores (the minimum — more is up to you)
+   - **Memory** — 1024 MB minimum; use 2048 MB if you plan to use the Video
+     Downloader plugin — its login helper runs a real browser
    - **Network** — bridge `vmbr0`, a **static** IPv4 with your gateway
      (DHCP works too, but the IP may change after a reboot — the installer
      warns about it)
@@ -59,7 +60,7 @@ pveam update
 pveam download local debian-13-standard
 pct create 120 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname bearnas --unprivileged 1 \
-  --cores 2 --memory 2048 --rootfs local-lvm:8 \
+  --cores 2 --memory 1024 --rootfs local-lvm:8 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1 \
   --start 1
 pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next section
@@ -67,8 +68,10 @@ pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next s
 
 `pveam download` accepts the short name `debian-13-standard` and fetches the
 current file; the template file name in `pct create` carries the point release,
-so check the exact name with `pveam list local`. Unprivileged containers are
-recommended and fully supported.
+so check the exact name with `pveam list local`. `--cores 2` and
+`--memory 1024` are the minimums — size up as you like, and use 2048 MB of
+memory if you will use the Video Downloader plugin. Unprivileged containers
+are recommended and fully supported.
 
 ## Prepare the data disk
 
