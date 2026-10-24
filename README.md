@@ -41,8 +41,9 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
      (DHCP works too, but the IP may change after a reboot — the installer
      warns about it)
    - **DNS** — leave at defaults · **Confirm** — tick *Start after created*
-3. Add the data disk: `CT → Resources → Add → Mount point` — pick a storage
-   and a size, set the mount point to `/mnt/disk1`.
+3. Add the data disk — see the next section; the quick way is
+   `CT → Resources → Add → Mount point` with a volume from any storage, mount
+   point `/mnt/disk1`.
 
 **Or from the Proxmox shell:**
 
@@ -54,15 +55,84 @@ pct create 120 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
   --cores 2 --memory 2048 --rootfs local-lvm:8 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1 \
   --start 1
-pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1
+pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next section
 ```
 
 The template file name carries the point release — check the exact name with
 `pveam list local`. Unprivileged containers are recommended and fully
-supported. Bind-mounting a host path (`--mp0 /tank/media,mp=/mnt/disk1`) also
-works, but on an unprivileged container files owned on the host show up as
-`nobody:nogroup` inside — prefer a storage-backed volume, or look into
-`idmap`, when ownership matters.
+supported.
+
+## Prepare the data disk
+
+All files live on data disks mounted inside the container — `/mnt/disk1` by
+default, and every `/mnt/disk*` mount shows up on the dashboard. Two ways to
+get a disk there.
+
+### A. A dedicated disk (the usual NAS setup)
+
+Run once on the **Proxmox host**. The example uses `/dev/sdb` — replace it with
+your disk, and note that steps 2–3 **erase everything on it**.
+
+1. Find the right disk (match it by size and by what is already mounted):
+
+   ```sh
+   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
+   ```
+
+2. Wipe it, partition, and format as ext4:
+
+   ```sh
+   wipefs -a /dev/sdb
+   parted --script /dev/sdb mklabel gpt mkpart primary ext4 1MiB 100%
+   mkfs.ext4 -L bearnas-data /dev/sdb1
+   ```
+
+3. Mount it on the host, permanently, by label:
+
+   ```sh
+   mkdir -p /mnt/pve/bearnas-data
+   echo 'LABEL=bearnas-data /mnt/pve/bearnas-data ext4 defaults 0 2' >> /etc/fstab
+   mount /mnt/pve/bearnas-data
+   ```
+
+4. Bind-mount it into the container and restart it:
+
+   ```sh
+   pct set 120 -mp0 /mnt/pve/bearnas-data,mp=/mnt/disk1,idmap=passthrough
+   pct reboot 120
+   ```
+
+`idmap=passthrough` keeps ownership on the mount as it is on the disk —
+container root owns its own files, which is what a NAS needs. Without it, an
+unprivileged container sees the whole mount as `nobody:nogroup` and cannot
+write to it. Bind mounts are configured from the shell — the GUI *Mount point*
+dialog only offers storage volumes.
+
+Additional disks: repeat with `-mp1 …,mp=/mnt/disk2`, `-mp2 …,mp=/mnt/disk3`,
+and so on.
+
+### B. A volume from an existing storage
+
+No spare disk? Give the container a volume from any Proxmox storage instead —
+GUI: `CT → Resources → Add → Mount point` (pick a storage and size, mount
+point `/mnt/disk1`), or CLI:
+
+```sh
+pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1
+```
+
+Proxmox formats the volume automatically and ownership works out of the box —
+the data just shares the host's storage pool instead of living on its own disk.
+
+Either way, verify inside the container before installing:
+
+```sh
+pct enter 120
+df -h /mnt/disk1
+```
+
+If your mount point is not `/mnt/disk1`, tell the installer where to look:
+`BEAR_STORAGE=/mnt/disk2 bash setup.sh --install`.
 
 ## GPU passthrough (optional)
 
