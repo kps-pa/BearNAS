@@ -1,24 +1,26 @@
 # BearNAS
 
-A NAS appliance in a single binary. BearNAS turns a small LXC container into a
+A NAS appliance as a single ready-made program. BearNAS turns a small LXC
+container into a
 home file server: a web dashboard, user management, Samba shares, and optional
 plugins for torrents and video downloading — everything is configured from the
 browser, in English or Thai.
 
-BearNAS is distributed as a prebuilt Linux binary. This repository holds the
-official installer (`setup.sh`) and the latest build (`dist/`); the installer
-fetches everything else it needs by itself.
+Installing BearNAS takes one script — `setup.sh`. It checks the system,
+downloads and verifies the program, and sets up the service; you never install
+anything by hand. The plugins are added later from the web UI, only the ones
+you need.
 
 ## Requirements
 
 | | |
 |---|---|
 | Platform | LXC container — Proxmox VE 9.x is the tested setup (the installer checks it is running inside a CT and refuses elsewhere) |
-| OS | Debian 13 (tested) or Debian 12, 64-bit x86 (amd64) — there is no ARM build |
+| OS | Debian 13 (tested) or Debian 12, 64-bit x86 (amd64) — there is no ARM version |
 | Access | root inside the container — from the Proxmox host: `pct enter <CT-ID>` |
 | System disk | 100 MB free minimum; 1 GB+ recommended, plugins are installed here (Video Downloader ≈ 200 MB, web-login helper ≈ 500 MB) |
 | Data disk | one mounted volume for your files — default `/mnt/disk1` |
-| Network | internet access (binary from GitHub, packages via apt) |
+| Network | internet access (the program downloads from GitHub, packages via apt) |
 | Ports | `8900` web UI (HTTPS) · `8901` plugin gateway |
 
 Proxmox VE 8.x should work too but is untested — the parts that touch Proxmox
@@ -37,7 +39,8 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
 2. Click **Create CT** (top right) and step through the wizard:
    - **General** — hostname `bearnas`, set the container root password
    - **Template** — Debian 13 standard
-   - **Disks** — 8 GB root disk (the binary, settings and plugins all live here)
+   - **Disks** — 8 GB root disk (the program, its settings and the plugins all
+     live here)
    - **CPU** — 2 cores
    - **Memory** — 2048 MB (1 GB works, but the video login helper runs a real
      browser, so 2 GB+ is comfortable)
@@ -210,8 +213,8 @@ BEAR_PORT=9000 BEAR_STORAGE=/mnt/disk2 bash setup.sh --install
 |---|---|---|
 | `BEAR_PORT` | `8900` | web UI port (HTTPS) |
 | `BEAR_STORAGE` | `/mnt/disk1` | mount point of the data disk |
-| `INSTALL_DIR` | `/opt/bearnas` | where the binary and its settings live |
-| `DIST_BASE` | `dist/` of this repo on GitHub | download source |
+| `INSTALL_DIR` | `/opt/bearnas` | where the program and its settings live |
+| `DIST_BASE` | GitHub (default) | where the program is downloaded from |
 
 ## First run
 
@@ -236,18 +239,18 @@ Installed on demand from the web UI (Plugins page) — only what you need:
 ## Update · Repair · Uninstall
 
 ```sh
-bash setup.sh --update     # download the latest build and restart
+bash setup.sh --update     # download the latest version and restart
 bash setup.sh --repair     # check the installation and fix what is broken
 bash setup.sh --uninstall  # remove BearNAS — data files are never touched
 ```
 
 `--update` verifies the download's checksum, restarts the service, and rolls
-back to the previous build automatically if the new one fails its health check.
+back to the previous version automatically if the new one fails its health check.
 Updates are also available directly from the web UI (Settings page).
 
-Uninstall removes the service, binary, settings database, the Samba accounts
-BearNAS created, and its `smb.conf` — files on the data disk are left exactly
-as they are.
+Uninstall removes the service, the program, its settings database, the Samba
+accounts BearNAS created, and its `smb.conf` — files on the data disk are left
+exactly as they are.
 
 ## Troubleshooting
 
@@ -258,13 +261,14 @@ bash setup.sh --repair          # re-check and fix the installation
 ```
 
 If the installer reports a checksum error right after a new release, wait a few
-minutes and retry — the GitHub CDN can lag behind the repository.
+minutes and retry — the download server can lag behind for a few minutes after
+a new release.
 
 On the Proxmox side:
 
 - The Debian 13 template is missing or flagged unsupported → update the host
   packages first (`apt update && apt full-upgrade` on the host, then
-  `pveam update` and re-download). Older `pve-container` builds predate
+  `pveam update` and re-download). Older Proxmox container packages predate
   Debian 13.
 - The data disk is not visible inside the container → check `pct config 120`
   for the `mp0:` line, and that the container was restarted after adding it.
