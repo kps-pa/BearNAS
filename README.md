@@ -21,25 +21,98 @@ fetches everything else it needs by itself.
 | Network | internet access (binary from GitHub, packages via apt) |
 | Ports | `8900` web UI (HTTPS) · `8901` plugin gateway |
 
-A fixed IP for the container is recommended — the installer warns about DHCP
-addresses because they can change after a reboot.
+## Create the container (Proxmox)
+
+BearNAS runs as the only application inside a dedicated LXC container. Create it
+once on the Proxmox host; the sizing below is a comfortable start for the plugins.
+
+**From the Proxmox web UI:**
+
+1. Download the Debian 12 template:
+   `Datacenter → local → CT Templates → Templates → debian-12-standard → Download`
+2. Click **Create CT** (top right) and step through the wizard:
+   - **General** — hostname `bearnas`, set the container root password
+   - **Template** — Debian 12 standard
+   - **Disks** — 8 GB root disk (the binary, settings and plugins all live here)
+   - **CPU** — 2 cores
+   - **Memory** — 2048 MB (1 GB works, but the video login helper runs a real
+     browser, so 2 GB+ is comfortable)
+   - **Network** — bridge `vmbr0`, a **static** IPv4 with your gateway
+     (DHCP works too, but the IP may change after a reboot — the installer
+     warns about it)
+   - **DNS** — leave at defaults · **Confirm** — tick *Start after created*
+3. Add the data disk: `CT → Resources → Add → Mount point` — pick a storage
+   and a size, set the mount point to `/mnt/disk1`.
+
+**Or from the Proxmox shell:**
+
+```sh
+pveam update
+pveam download local debian-12-standard
+pct create 120 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
+  --hostname bearnas --unprivileged 1 \
+  --cores 2 --memory 2048 --rootfs local-lvm:8 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1 \
+  --start 1
+pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1
+```
+
+The template file name carries the point release — check the exact name with
+`pveam list local`. Unprivileged containers are recommended and fully
+supported. Bind-mounting a host path (`--mp0 /tank/media,mp=/mnt/disk1`) also
+works, but on an unprivileged container files owned on the host show up as
+`nobody:nogroup` inside — prefer a storage-backed volume, or look into
+`idmap`, when ownership matters.
+
+## GPU passthrough (optional)
+
+If the host has a graphics card (an Intel or AMD iGPU counts), you can pass it
+into the container. BearNAS then detects it and shows it on the dashboard
+(vendor, render node, VAAPI capability). NVIDIA cards are detected as well, but
+making one usable inside a container requires the NVIDIA driver stack and is
+out of scope here — Intel/AMD is the straightforward path.
+
+First confirm on the **host** that the render node exists (driver loaded):
+
+```sh
+ls -l /dev/dri/
+```
+
+Then attach it — Proxmox VE 8.2 or newer:
+
+- **Web UI:** `CT → Resources → Add → Device Passthrough` — path
+  `/dev/dri/renderD128`
+- **Shell:**
+
+  ```sh
+  pct set 120 --dev0 path=/dev/dri/renderD128
+  ```
+
+Add `uid=0,gid=0,mode=666` to the `--dev0` line if programs inside an
+unprivileged container must open the device itself — BearNAS only reads device
+metadata, so the plain form above is enough for the dashboard. The change
+applies at the next container start.
+
+On Proxmox VE 8.1 and older there is no Device Passthrough option — add the
+device by hand in `/etc/pve/lxc/<CT-ID>.conf` instead:
+
+```
+lxc.cgroup2.devices.allow: c 226:128 rwm
+lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file
+```
+
+`226` is the DRI device major and `128` the minor of `renderD128` — a second
+card (`renderD129`) would be `c 226:129`.
 
 ## Install
 
-1. Create a Debian LXC container in Proxmox and mount your data disk into it,
-   for example on the host:
+Enter the container and run the installer as root:
 
-   ```sh
-   pct set <CT-ID> -mp0 /tank/media,mp=/mnt/disk1
-   ```
-
-2. Enter the container and run the installer as root:
-
-   ```sh
-   pct enter <CT-ID>
-   curl -fsSL https://raw.githubusercontent.com/kps-pa/BearNAS/main/setup.sh -o setup.sh
-   bash setup.sh
-   ```
+```sh
+pct enter <CT-ID>
+curl -fsSL https://raw.githubusercontent.com/kps-pa/BearNAS/main/setup.sh -o setup.sh
+bash setup.sh
+```
 
 The installer runs six stages — system check, network, base packages, download,
 service, health check. Everything is verified first: if any check fails,
