@@ -13,13 +13,17 @@ fetches everything else it needs by itself.
 
 | | |
 |---|---|
-| Platform | LXC container (Proxmox is the supported setup — the installer checks it is running inside a CT and refuses elsewhere) |
-| OS | Debian, 64-bit x86 (amd64) — there is no ARM build |
+| Platform | LXC container — Proxmox VE 9.x is the tested setup (the installer checks it is running inside a CT and refuses elsewhere) |
+| OS | Debian 13 (tested) or Debian 12, 64-bit x86 (amd64) — there is no ARM build |
 | Access | root inside the container — from the Proxmox host: `pct enter <CT-ID>` |
 | System disk | 100 MB free minimum; 1 GB+ recommended, plugins are installed here (Video Downloader ≈ 200 MB, web-login helper ≈ 500 MB) |
 | Data disk | one mounted volume for your files — default `/mnt/disk1` |
 | Network | internet access (binary from GitHub, packages via apt) |
 | Ports | `8900` web UI (HTTPS) · `8901` plugin gateway |
+
+Proxmox VE 8.x should work too but is untested — the parts that touch Proxmox
+are standard LXC features that have not changed. If you run it there, you are
+the pioneer.
 
 ## Create the container (Proxmox)
 
@@ -28,11 +32,11 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
 
 **From the Proxmox web UI:**
 
-1. Download the Debian 12 template:
-   `Datacenter → local → CT Templates → Templates → debian-12-standard → Download`
+1. Download the Debian 13 template:
+   `Datacenter → local → CT Templates → Templates → debian-13-standard → Download`
 2. Click **Create CT** (top right) and step through the wizard:
    - **General** — hostname `bearnas`, set the container root password
-   - **Template** — Debian 12 standard
+   - **Template** — Debian 13 standard
    - **Disks** — 8 GB root disk (the binary, settings and plugins all live here)
    - **CPU** — 2 cores
    - **Memory** — 2048 MB (1 GB works, but the video login helper runs a real
@@ -49,8 +53,8 @@ once on the Proxmox host; the sizing below is a comfortable start for the plugin
 
 ```sh
 pveam update
-pveam download local debian-12-standard
-pct create 120 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
+pveam download local debian-13-standard
+pct create 120 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname bearnas --unprivileged 1 \
   --cores 2 --memory 2048 --rootfs local-lvm:8 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1 \
@@ -58,15 +62,19 @@ pct create 120 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
 pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1   # or a dedicated disk — next section
 ```
 
-The template file name carries the point release — check the exact name with
-`pveam list local`. Unprivileged containers are recommended and fully
-supported.
+`pveam download` accepts the short name `debian-13-standard` and fetches the
+current file; the template file name in `pct create` carries the point release,
+so check the exact name with `pveam list local`. Unprivileged containers are
+recommended and fully supported.
 
 ## Prepare the data disk
 
 All files live on data disks mounted inside the container — `/mnt/disk1` by
 default, and every `/mnt/disk*` mount shows up on the dashboard. Two ways to
 get a disk there.
+
+> A mount point added to a **running** container only appears after the next
+> container restart — the verification step below includes it.
 
 ### A. A dedicated disk (the usual NAS setup)
 
@@ -84,6 +92,7 @@ your disk, and note that steps 2–3 **erase everything on it**.
    ```sh
    wipefs -a /dev/sdb
    parted --script /dev/sdb mklabel gpt mkpart primary ext4 1MiB 100%
+   partprobe /dev/sdb
    mkfs.ext4 -L bearnas-data /dev/sdb1
    ```
 
@@ -95,11 +104,10 @@ your disk, and note that steps 2–3 **erase everything on it**.
    mount /mnt/pve/bearnas-data
    ```
 
-4. Bind-mount it into the container and restart it:
+4. Bind-mount it into the container:
 
    ```sh
    pct set 120 -mp0 /mnt/pve/bearnas-data,mp=/mnt/disk1,idmap=passthrough
-   pct reboot 120
    ```
 
 `idmap=passthrough` keeps ownership on the mount as it is on the disk —
@@ -124,9 +132,12 @@ pct set 120 --mp0 local-lvm:200,mp=/mnt/disk1
 Proxmox formats the volume automatically and ownership works out of the box —
 the data just shares the host's storage pool instead of living on its own disk.
 
-Either way, verify inside the container before installing:
+### Verify from inside the container
+
+Restart the container so the new mount point appears, then check:
 
 ```sh
+pct reboot 120
 pct enter 120
 df -h /mnt/disk1
 ```
@@ -248,3 +259,12 @@ bash setup.sh --repair          # re-check and fix the installation
 
 If the installer reports a checksum error right after a new release, wait a few
 minutes and retry — the GitHub CDN can lag behind the repository.
+
+On the Proxmox side:
+
+- The Debian 13 template is missing or flagged unsupported → update the host
+  packages first (`apt update && apt full-upgrade` on the host, then
+  `pveam update` and re-download). Older `pve-container` builds predate
+  Debian 13.
+- The data disk is not visible inside the container → check `pct config 120`
+  for the `mp0:` line, and that the container was restarted after adding it.
