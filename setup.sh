@@ -18,6 +18,11 @@
 set -euo pipefail
 
 ### ── Defaults ──
+# จำว่าผู้รันส่ง env มาเองหรือไม่ — ส่งมาเอง = ชนะค่าที่ติดตั้งไว้เสมอ
+# (ไม่งั้นการ re-run --install เพื่อเปลี่ยนพอร์ตจะถูกค่าเก่าใน unit ทับกลับ)
+_env_port="${BEAR_PORT:-}"
+_env_storage="${BEAR_STORAGE:-}"
+_env_dir="${INSTALL_DIR:-}"
 BEAR_PORT="${BEAR_PORT:-8900}"
 BEAR_STORAGE="${BEAR_STORAGE:-/mnt/disk1}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/bearnas}"
@@ -60,13 +65,20 @@ quick_guard() {
 }
 
 # อ่านค่าที่ "ติดตั้งจริง" จาก unit file (พอร์ต/ดิสก์อาจไม่ใช่ค่า default ของ env วันนี้)
+# ลำดับชนะ: env ที่ผู้รันส่งมาเอง > ค่าใน unit > default · grep ไม่เจอต้องไม่ทำให้สคริปต์
+# ตายกลางทาง (set -e กับ command substitution ที่ fail = exit เงียบ ๆ — unit ที่แก้มือ
+# ไม่มีบรรทัด Environment= จะทำ --update/--repair ตายตั้งแต่บรรทัดนี้ถ้าไม่มี || true)
 read_unit_env() {
   if [ -f /etc/systemd/system/bearnas.service ]; then
-    _p="$(grep -o '^Environment=BEAR_PORT=[0-9]\+' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3)"
+    _p="$(grep -o '^Environment=BEAR_PORT=[0-9]\+' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3 || true)"
     # -f3- เก็บค่าทั้งหมดหลัง '=' ที่สอง — พาธอย่าง /mnt/d=1 ต้องไม่ถูกตัดเหลือ /mnt/d
-    _s="$(grep -o '^Environment=BEAR_STORAGE=[^ ]*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3-)"
-    [ -n "$_p" ] && BEAR_PORT="$_p"
-    [ -n "$_s" ] && BEAR_STORAGE="$_s"
+    _s="$(grep -o '^Environment=BEAR_STORAGE=[^ ]*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f3- || true)"
+    # INSTALL_DIR ก็ติดตั้งไว้ที่ WorkingDirectory= — ไม่อ่านแล้ว --update กับ --repair
+    # จะหาตัว binary ที่ /opt/bearnas ทั้งที่ของจริงอยู่ที่อื่น
+    _d="$(grep -o '^WorkingDirectory=.*' /etc/systemd/system/bearnas.service | tail -1 | cut -d= -f2- || true)"
+    if [ -z "$_env_port" ] && [ -n "$_p" ]; then BEAR_PORT="$_p"; fi
+    if [ -z "$_env_storage" ] && [ -n "$_s" ]; then BEAR_STORAGE="$_s"; fi
+    if [ -z "$_env_dir" ] && [ -n "$_d" ]; then INSTALL_DIR="$_d"; fi
   fi
 }
 
@@ -102,6 +114,11 @@ download_bearnas() {
   url="$DIST_BASE/bearnas-linux-$GOARCH2/bearnas"
   echo "  From: $url"
   mkdir -p "$INSTALL_DIR"
+  # สำรองตัวที่ติดตั้งอยู่ก่อนทับ (ทั้งโหมด install/update) — งาน health check ล้ม
+  # จะได้กู้คืนได้ทันที ไม่ทิ้งเครื่องด้วย binary เสียและไม่มีทางถอย
+  if [ -f "$INSTALL_DIR/bearnas" ]; then
+    cp -p "$INSTALL_DIR/bearnas" "$INSTALL_DIR/bearnas.bak"
+  fi
   if ! curl -fsSL --max-time 600 -o "$INSTALL_DIR/bearnas.tmp" "$url"; then
     rm -f "$INSTALL_DIR/bearnas.tmp"
     printf '  [FAIL] Download — could not fetch %s\n' "$url"
@@ -174,8 +191,10 @@ wait_health() {
 }
 
 show_diag() {
-  systemctl status bearnas --no-pager 2>&1 | head -15
-  journalctl -u bearnas -n 20 --no-pager 2>&1 | tail -20
+  # || true ทั้งคู่ — systemctl status คืน non-zero เมื่อบริการพัง (พอดีกับโอกาสที่เราเรียก)
+  # และ head ก็ส่ง SIGPIPE · ไม่มีตัวนี้ set -e จะตัดจบ "ก่อน" พิมพ์ journalctl = หาสาเหตุไม่ได้
+  systemctl status bearnas --no-pager 2>&1 | head -15 || true
+  journalctl -u bearnas -n 20 --no-pager 2>&1 | tail -20 || true
 }
 
 summary() {
@@ -198,8 +217,22 @@ remove_bearnas() {
   # normalize ก่อนเทียบ blocklist — "/usr/" หรือ "/opt/." ต้องถูกจับเหมือน "/usr"
   INSTALL_DIR="${INSTALL_DIR%/}"
   case "$INSTALL_DIR" in
-    ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home"|"/boot"|"/sbin"|"/usr/bin"|"/usr/lib")
+    ""|"/"|"/usr"|"/etc"|"/opt"|"/var"|"/bin"|"/lib"|"/home"|"/boot"|"/sbin"|"/mnt"|"/usr/bin"|"/usr/lib")
       printf 'Refusing to delete INSTALL_DIR=%s\n' "$INSTALL_DIR"
+      exit 1
+      ;;
+  esac
+  # ห้ามลบทับดิสก์ข้อมูลเด็ดขาด: INSTALL_DIR ซ้อนอยู่ใน BEAR_STORAGE หรือ BEAR_STORAGE
+  # ซ้อนอยู่ใน INSTALL_DIR (เช่น INSTALL_DIR=/mnt/disk1) = rm -rf ลบข้อมูลผู้ใช้ทั้งดิสก์
+  case "$BEAR_STORAGE" in
+    "$INSTALL_DIR"|"$INSTALL_DIR"/*)
+      printf 'Refusing to delete INSTALL_DIR=%s — it contains the storage (%s)\n' "$INSTALL_DIR" "$BEAR_STORAGE"
+      exit 1
+      ;;
+  esac
+  case "$INSTALL_DIR" in
+    "$BEAR_STORAGE"|"$BEAR_STORAGE"/*)
+      printf 'Refusing to delete INSTALL_DIR=%s — it is inside the storage (%s)\n' "$INSTALL_DIR" "$BEAR_STORAGE"
       exit 1
       ;;
   esac
@@ -350,7 +383,19 @@ update_bearnas() {
     if wait_health; then
       ok "Restarted with the refreshed unit — responding over HTTPS"
     else
-      fail "Service" "no response in 15s after unit refresh"
+      fail "Service" "no response in 15s after unit refresh — rolling back to the previous build"
+      # rollback เหมือนเส้นทาง restart หลัก: unit เขียนใหม่แล้ว + binary ใหม่ลุกไม่ขึ้น
+      # = ต้องคืน binary เดิม ไม่ปล่อย crash-loop ทั้งที่ bearnas.bak นอนอยู่ข้าง ๆ
+      if [ -f "$INSTALL_DIR/bearnas.bak" ]; then
+        cp -p "$INSTALL_DIR/bearnas.bak" "$INSTALL_DIR/bearnas"
+        rm -f "$INSTALL_DIR/bearnas.bak"
+        systemctl restart bearnas
+        if wait_health; then
+          ok "Rolled back — the previous build is running again"
+        else
+          warn "Rollback did not come up either — check: journalctl -u bearnas -n 50"
+        fi
+      fi
       show_diag
       exit 1
     fi
@@ -536,6 +581,10 @@ esac
 ### ═══ Stage 1/6 — System check ═══
 stage "1/6 System check"
 FAILS=0
+# --install ใช้เป็น "อัปเกรด" ได้ (หัวกระดาษบอกเอง) — ต้องคงค่าที่ติดตั้งไว้จาก unit
+# ปัจจุบันไว้ก่อน ไม่งั้น write_unit ตอนท้ายจะกลับไปใช้ default ทับพอร์ต/ดิสก์เดิม
+# (ผู้ติดตั้งด้วย BEAR_PORT=9000 แล้ว re-run --install ธรรมดา = บริการกลับไปซุก 8900)
+read_unit_env
 
 if [ "$(id -u)" -eq 0 ]; then ok "Running as administrator (root)"; else fail "Administrator" "run this script as root"; fi
 
@@ -678,8 +727,21 @@ write_unit
 stage "6/6 Health check"
 if wait_health; then
   ok "BearNAS is responding over HTTPS"
+  rm -f "$INSTALL_DIR/bearnas.bak"
 else
-  fail "Service" "no response in 15s"
+  fail "Service" "no response in 15s — rolling back to the previous build"
+  # กู้คืน binary เดิม (download_bearnas สำรองไว้ให้ก่อนทับเสมอ) — โหมด install ที่ใช้
+  # อัปเกรดก็ต้องมีทางถอยเหมือน --update ไม่ใช่ทิ้งเครื่องด้วย build ใหม่ที่ลุกไม่ขึ้น
+  if [ -f "$INSTALL_DIR/bearnas.bak" ]; then
+    cp -p "$INSTALL_DIR/bearnas.bak" "$INSTALL_DIR/bearnas"
+    rm -f "$INSTALL_DIR/bearnas.bak"
+    systemctl restart bearnas
+    if wait_health; then
+      ok "Rolled back — the previous build is running again"
+    else
+      warn "Rollback did not come up either — check: journalctl -u bearnas -n 50"
+    fi
+  fi
   show_diag
   exit 1
 fi
